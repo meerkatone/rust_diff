@@ -1,0 +1,817 @@
+"""
+Qt GUI for displaying binary diff results with sorting and export functionality
+"""
+
+import sys
+import json
+import csv
+import sqlite3
+import os
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+
+try:
+    from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
+                                   QWidget, QTableWidget, QTableWidgetItem, QPushButton, 
+                                   QLabel, QComboBox, QLineEdit, QTextEdit, QSplitter,
+                                   QHeaderView, QFileDialog, QMessageBox, QProgressBar,
+                                   QGroupBox, QGridLayout, QTabWidget, QCheckBox)
+    from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QThread, Signal
+    from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QColor
+    PYSIDE_VERSION = 6
+except ImportError:
+    try:
+        from PySide2.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
+                                       QWidget, QTableWidget, QTableWidgetItem, QPushButton, 
+                                       QLabel, QComboBox, QLineEdit, QTextEdit, QSplitter,
+                                       QHeaderView, QFileDialog, QMessageBox, QProgressBar,
+                                       QGroupBox, QGridLayout, QTabWidget, QCheckBox)
+        from PySide2.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QThread, pyqtSignal as Signal
+        from PySide2.QtGui import QStandardItemModel, QStandardItem, QFont, QColor
+        PYSIDE_VERSION = 2
+    except ImportError:
+        raise ImportError("Neither PySide6 nor PySide2 is available. Please install one of them.")
+
+
+class DiffResultsTableModel(QAbstractTableModel):
+    """Custom table model for diff results with sorting support"""
+    
+    def __init__(self, results=None):
+        super().__init__()
+        self.results = results or []
+        self.headers = [
+            "Function A", "Address A", "Function B", "Address B", 
+            "Similarity", "Confidence", "Match Type", "Size A", "Size B",
+            "BB Count A", "BB Count B", "Instr Count A", "Instr Count B"
+        ]
+        
+    def rowCount(self, parent=QModelIndex()):
+        return len(self.results)
+    
+    def columnCount(self, parent=QModelIndex()):
+        return len(self.headers)
+    
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            return self.headers[section]
+        return None
+    
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or index.row() >= len(self.results):
+            return None
+            
+        result = self.results[index.row()]
+        column = index.column()
+        
+        if role == Qt.DisplayRole:
+            if column == 0:  # Function A
+                return result.get('function_a', {}).get('name', '')
+            elif column == 1:  # Address A
+                return f"0x{result.get('function_a', {}).get('address', 0):x}"
+            elif column == 2:  # Function B
+                return result.get('function_b', {}).get('name', '')
+            elif column == 3:  # Address B
+                return f"0x{result.get('function_b', {}).get('address', 0):x}"
+            elif column == 4:  # Similarity
+                return f"{result.get('similarity', 0):.4f}"
+            elif column == 5:  # Confidence
+                return f"{result.get('confidence', 0):.4f}"
+            elif column == 6:  # Match Type
+                return result.get('match_type', '')
+            elif column == 7:  # Size A
+                return str(result.get('function_a', {}).get('size', 0))
+            elif column == 8:  # Size B
+                return str(result.get('function_b', {}).get('size', 0))
+            elif column == 9:  # BB Count A
+                return str(len(result.get('function_a', {}).get('basic_blocks', [])))
+            elif column == 10:  # BB Count B
+                return str(len(result.get('function_b', {}).get('basic_blocks', [])))
+            elif column == 11:  # Instr Count A
+                return str(len(result.get('function_a', {}).get('instructions', [])))
+            elif column == 12:  # Instr Count B
+                return str(len(result.get('function_b', {}).get('instructions', [])))
+        
+        elif role == Qt.BackgroundRole:
+            # Color code by match type with darker colors
+            match_type = result.get('match_type', '')
+            if match_type == 'Exact':
+                return QColor(144, 238, 144)  # Darker green
+            elif match_type == 'Structural':
+                return QColor(255, 215, 0)    # Darker amber/gold
+            elif match_type == 'Heuristic':
+                return QColor(255, 182, 193)  # Darker red
+                
+        elif role == Qt.TextColorRole:
+            # Set text color for better contrast
+            match_type = result.get('match_type', '')
+            if match_type == 'Exact':
+                return QColor(0, 100, 0)      # Dark green text
+            elif match_type == 'Structural':
+                return QColor(139, 69, 19)    # Dark brown text
+            elif match_type == 'Heuristic':
+                return QColor(139, 0, 0)      # Dark red text
+            else:
+                return QColor(0, 0, 0)        # Black text for default
+                
+        return None
+    
+    def sort(self, column, order):
+        """Sort the data by the given column"""
+        if column == 0:  # Function A
+            key = lambda x: x.get('function_a', {}).get('name', '')
+        elif column == 1:  # Address A
+            key = lambda x: x.get('function_a', {}).get('address', 0)
+        elif column == 2:  # Function B
+            key = lambda x: x.get('function_b', {}).get('name', '')
+        elif column == 3:  # Address B
+            key = lambda x: x.get('function_b', {}).get('address', 0)
+        elif column == 4:  # Similarity
+            key = lambda x: x.get('similarity', 0)
+        elif column == 5:  # Confidence
+            key = lambda x: x.get('confidence', 0)
+        elif column == 6:  # Match Type
+            key = lambda x: x.get('match_type', '')
+        elif column == 7:  # Size A
+            key = lambda x: x.get('function_a', {}).get('size', 0)
+        elif column == 8:  # Size B
+            key = lambda x: x.get('function_b', {}).get('size', 0)
+        elif column == 9:  # BB Count A
+            key = lambda x: len(x.get('function_a', {}).get('basic_blocks', []))
+        elif column == 10:  # BB Count B
+            key = lambda x: len(x.get('function_b', {}).get('basic_blocks', []))
+        elif column == 11:  # Instr Count A
+            key = lambda x: len(x.get('function_a', {}).get('instructions', []))
+        elif column == 12:  # Instr Count B
+            key = lambda x: len(x.get('function_b', {}).get('instructions', []))
+        else:
+            key = lambda x: 0
+            
+        self.layoutAboutToBeChanged.emit()
+        self.results.sort(key=key, reverse=(order == Qt.DescendingOrder))
+        self.layoutChanged.emit()
+    
+    def update_data(self, results):
+        """Update the model with new data"""
+        self.beginResetModel()
+        self.results = results
+        self.endResetModel()
+
+
+class DiffResultsWindow(QMainWindow):
+    """Main window for displaying diff results"""
+    
+    def __init__(self, results_data=None):
+        super().__init__()
+        self.results_data = results_data or {}
+        self.filtered_results = []
+        self.setup_ui()
+        self.load_results()
+        
+    def setup_ui(self):
+        """Setup the user interface"""
+        self.setWindowTitle("Binary Diff Results")
+        self.setGeometry(100, 100, 1400, 800)
+        
+        # Central widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # Main layout
+        main_layout = QVBoxLayout(central_widget)
+        
+        # Create tabs
+        tabs = QTabWidget()
+        main_layout.addWidget(tabs)
+        
+        # Results tab
+        results_tab = QWidget()
+        tabs.addTab(results_tab, "Results")
+        self.setup_results_tab(results_tab)
+        
+        # Summary tab
+        summary_tab = QWidget()
+        tabs.addTab(summary_tab, "Summary")
+        self.setup_summary_tab(summary_tab)
+        
+        # Export tab
+        export_tab = QWidget()
+        tabs.addTab(export_tab, "Export")
+        self.setup_export_tab(export_tab)
+        
+    def setup_results_tab(self, tab):
+        """Setup the results display tab"""
+        layout = QVBoxLayout(tab)
+        
+        # Filters section
+        filters_group = QGroupBox("Filters")
+        filters_layout = QGridLayout(filters_group)
+        
+        # Match type filter
+        filters_layout.addWidget(QLabel("Match Type:"), 0, 0)
+        self.match_type_combo = QComboBox()
+        self.match_type_combo.addItems(["All", "Exact", "Structural", "Heuristic", "Manual"])
+        self.match_type_combo.currentTextChanged.connect(self.apply_filters)
+        filters_layout.addWidget(self.match_type_combo, 0, 1)
+        
+        # Similarity threshold
+        filters_layout.addWidget(QLabel("Min Similarity:"), 0, 2)
+        self.similarity_threshold = QLineEdit("0.0")
+        self.similarity_threshold.textChanged.connect(self.apply_filters)
+        filters_layout.addWidget(self.similarity_threshold, 0, 3)
+        
+        # Confidence threshold
+        filters_layout.addWidget(QLabel("Min Confidence:"), 0, 4)
+        self.confidence_threshold = QLineEdit("0.0")
+        self.confidence_threshold.textChanged.connect(self.apply_filters)
+        filters_layout.addWidget(self.confidence_threshold, 0, 5)
+        
+        # Function name filter
+        filters_layout.addWidget(QLabel("Function Name:"), 1, 0)
+        self.function_name_filter = QLineEdit()
+        self.function_name_filter.setPlaceholderText("Filter by function name...")
+        self.function_name_filter.textChanged.connect(self.apply_filters)
+        filters_layout.addWidget(self.function_name_filter, 1, 1, 1, 2)
+        
+        # Reset filters button
+        reset_button = QPushButton("Reset Filters")
+        reset_button.clicked.connect(self.reset_filters)
+        filters_layout.addWidget(reset_button, 1, 3)
+        
+        layout.addWidget(filters_group)
+        
+        # Results table
+        self.table_model = DiffResultsTableModel()
+        self.table_view = QTableWidget()
+        self.table_view.setSortingEnabled(True)
+        self.table_view.setAlternatingRowColors(True)
+        self.table_view.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table_view.horizontalHeader().setStretchLastSection(True)
+        
+        layout.addWidget(self.table_view)
+        
+        # Status bar
+        status_layout = QHBoxLayout()
+        self.status_label = QLabel("Ready")
+        self.results_count_label = QLabel("0 results")
+        status_layout.addWidget(self.status_label)
+        status_layout.addStretch()
+        status_layout.addWidget(self.results_count_label)
+        layout.addLayout(status_layout)
+        
+    def setup_summary_tab(self, tab):
+        """Setup the summary statistics tab"""
+        layout = QVBoxLayout(tab)
+        
+        # Summary statistics
+        stats_group = QGroupBox("Statistics")
+        stats_layout = QGridLayout(stats_group)
+        
+        self.total_matches_label = QLabel("0")
+        self.exact_matches_label = QLabel("0")
+        self.structural_matches_label = QLabel("0")
+        self.heuristic_matches_label = QLabel("0")
+        self.avg_similarity_label = QLabel("0.0000")
+        self.avg_confidence_label = QLabel("0.0000")
+        self.unmatched_a_label = QLabel("0")
+        self.unmatched_b_label = QLabel("0")
+        
+        stats_layout.addWidget(QLabel("Total Matches:"), 0, 0)
+        stats_layout.addWidget(self.total_matches_label, 0, 1)
+        stats_layout.addWidget(QLabel("Exact Matches:"), 1, 0)
+        stats_layout.addWidget(self.exact_matches_label, 1, 1)
+        stats_layout.addWidget(QLabel("Structural Matches:"), 2, 0)
+        stats_layout.addWidget(self.structural_matches_label, 2, 1)
+        stats_layout.addWidget(QLabel("Heuristic Matches:"), 3, 0)
+        stats_layout.addWidget(self.heuristic_matches_label, 3, 1)
+        stats_layout.addWidget(QLabel("Average Similarity:"), 0, 2)
+        stats_layout.addWidget(self.avg_similarity_label, 0, 3)
+        stats_layout.addWidget(QLabel("Average Confidence:"), 1, 2)
+        stats_layout.addWidget(self.avg_confidence_label, 1, 3)
+        stats_layout.addWidget(QLabel("Unmatched A:"), 2, 2)
+        stats_layout.addWidget(self.unmatched_a_label, 2, 3)
+        stats_layout.addWidget(QLabel("Unmatched B:"), 3, 2)
+        stats_layout.addWidget(self.unmatched_b_label, 3, 3)
+        
+        layout.addWidget(stats_group)
+        
+        # Binary information
+        binary_info_group = QGroupBox("Binary Information")
+        binary_layout = QGridLayout(binary_info_group)
+        
+        self.binary_a_label = QLabel("N/A")
+        self.binary_b_label = QLabel("N/A")
+        self.analysis_time_label = QLabel("N/A")
+        
+        binary_layout.addWidget(QLabel("Binary A:"), 0, 0)
+        binary_layout.addWidget(self.binary_a_label, 0, 1)
+        binary_layout.addWidget(QLabel("Binary B:"), 1, 0)
+        binary_layout.addWidget(self.binary_b_label, 1, 1)
+        binary_layout.addWidget(QLabel("Analysis Time:"), 2, 0)
+        binary_layout.addWidget(self.analysis_time_label, 2, 1)
+        
+        layout.addWidget(binary_info_group)
+        
+        layout.addStretch()
+        
+    def setup_export_tab(self, tab):
+        """Setup the export options tab"""
+        layout = QVBoxLayout(tab)
+        
+        # Export options
+        export_group = QGroupBox("Export Options")
+        export_layout = QGridLayout(export_group)
+        
+        # CSV export
+        csv_button = QPushButton("Export to CSV")
+        csv_button.clicked.connect(self.export_to_csv)
+        export_layout.addWidget(csv_button, 0, 0)
+        
+        # SQLite export
+        sqlite_button = QPushButton("Export to SQLite")
+        sqlite_button.clicked.connect(self.export_to_sqlite)
+        export_layout.addWidget(sqlite_button, 0, 1)
+        
+        # JSON export
+        json_button = QPushButton("Export to JSON")
+        json_button.clicked.connect(self.export_to_json)
+        export_layout.addWidget(json_button, 0, 2)
+        
+        # HTML export
+        html_button = QPushButton("Export to HTML")
+        html_button.clicked.connect(self.export_to_html)
+        export_layout.addWidget(html_button, 1, 0)
+        
+        layout.addWidget(export_group)
+        
+        # Export options
+        options_group = QGroupBox("Export Settings")
+        options_layout = QGridLayout(options_group)
+        
+        self.include_unmatched_checkbox = QCheckBox("Include unmatched functions")
+        self.include_unmatched_checkbox.setChecked(True)
+        options_layout.addWidget(self.include_unmatched_checkbox, 0, 0)
+        
+        self.include_details_checkbox = QCheckBox("Include detailed match information")
+        self.include_details_checkbox.setChecked(False)
+        options_layout.addWidget(self.include_details_checkbox, 0, 1)
+        
+        layout.addWidget(options_group)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+        
+        layout.addStretch()
+        
+    def load_results(self):
+        """Load results into the table"""
+        if not self.results_data:
+            return
+            
+        # Extract matched functions
+        matched_functions = self.results_data.get('matched_functions', [])
+        
+        # Convert to table format
+        self.all_results = []
+        for match in matched_functions:
+            self.all_results.append(match)
+            
+        # Update filtered results
+        self.filtered_results = self.all_results.copy()
+        self.update_table()
+        self.update_summary()
+        
+    def update_table(self):
+        """Update the table with current filtered results"""
+        self.table_view.setRowCount(len(self.filtered_results))
+        self.table_view.setColumnCount(13)
+        
+        # Set headers
+        headers = [
+            "Function A", "Address A", "Function B", "Address B", 
+            "Similarity", "Confidence", "Match Type", "Size A", "Size B",
+            "BB Count A", "BB Count B", "Instr Count A", "Instr Count B"
+        ]
+        self.table_view.setHorizontalHeaderLabels(headers)
+        
+        # Populate table
+        for row, result in enumerate(self.filtered_results):
+            func_a = result.get('function_a', {})
+            func_b = result.get('function_b', {})
+            
+            self.table_view.setItem(row, 0, QTableWidgetItem(func_a.get('name', '')))
+            self.table_view.setItem(row, 1, QTableWidgetItem(f"0x{func_a.get('address', 0):x}"))
+            self.table_view.setItem(row, 2, QTableWidgetItem(func_b.get('name', '')))
+            self.table_view.setItem(row, 3, QTableWidgetItem(f"0x{func_b.get('address', 0):x}"))
+            self.table_view.setItem(row, 4, QTableWidgetItem(f"{result.get('similarity', 0):.4f}"))
+            self.table_view.setItem(row, 5, QTableWidgetItem(f"{result.get('confidence', 0):.4f}"))
+            self.table_view.setItem(row, 6, QTableWidgetItem(result.get('match_type', '')))
+            self.table_view.setItem(row, 7, QTableWidgetItem(str(func_a.get('size', 0))))
+            self.table_view.setItem(row, 8, QTableWidgetItem(str(func_b.get('size', 0))))
+            self.table_view.setItem(row, 9, QTableWidgetItem(str(len(func_a.get('basic_blocks', [])))))
+            self.table_view.setItem(row, 10, QTableWidgetItem(str(len(func_b.get('basic_blocks', [])))))
+            self.table_view.setItem(row, 11, QTableWidgetItem(str(len(func_a.get('instructions', [])))))
+            self.table_view.setItem(row, 12, QTableWidgetItem(str(len(func_b.get('instructions', [])))))
+            
+            # Color code rows by match type with darker colors and better contrast
+            match_type = result.get('match_type', '')
+            if match_type == 'Exact':
+                bg_color = QColor(144, 238, 144)  # Darker green
+                text_color = QColor(0, 100, 0)   # Dark green text
+            elif match_type == 'Structural':
+                bg_color = QColor(255, 215, 0)   # Darker amber/gold
+                text_color = QColor(139, 69, 19) # Dark brown text
+            elif match_type == 'Heuristic':
+                bg_color = QColor(255, 182, 193) # Darker red
+                text_color = QColor(139, 0, 0)   # Dark red text
+            else:
+                bg_color = QColor(255, 255, 255) # White
+                text_color = QColor(0, 0, 0)     # Black text
+                
+            for col in range(13):
+                item = self.table_view.item(row, col)
+                if item:
+                    item.setBackground(bg_color)
+                    item.setForeground(text_color)
+        
+        # Resize columns to content
+        self.table_view.resizeColumnsToContents()
+        
+        # Update status
+        self.results_count_label.setText(f"{len(self.filtered_results)} results")
+        
+    def update_summary(self):
+        """Update summary statistics"""
+        if not self.results_data:
+            return
+            
+        matched_functions = self.results_data.get('matched_functions', [])
+        unmatched_a = self.results_data.get('unmatched_functions_a', [])
+        unmatched_b = self.results_data.get('unmatched_functions_b', [])
+        
+        # Count match types
+        exact_count = sum(1 for m in matched_functions if m.get('match_type') == 'Exact')
+        structural_count = sum(1 for m in matched_functions if m.get('match_type') == 'Structural')
+        heuristic_count = sum(1 for m in matched_functions if m.get('match_type') == 'Heuristic')
+        
+        # Calculate averages
+        if matched_functions:
+            avg_similarity = sum(m.get('similarity', 0) for m in matched_functions) / len(matched_functions)
+            avg_confidence = sum(m.get('confidence', 0) for m in matched_functions) / len(matched_functions)
+        else:
+            avg_similarity = 0
+            avg_confidence = 0
+            
+        # Update labels
+        self.total_matches_label.setText(str(len(matched_functions)))
+        self.exact_matches_label.setText(str(exact_count))
+        self.structural_matches_label.setText(str(structural_count))
+        self.heuristic_matches_label.setText(str(heuristic_count))
+        self.avg_similarity_label.setText(f"{avg_similarity:.4f}")
+        self.avg_confidence_label.setText(f"{avg_confidence:.4f}")
+        self.unmatched_a_label.setText(str(len(unmatched_a)))
+        self.unmatched_b_label.setText(str(len(unmatched_b)))
+        
+        # Update binary information
+        self.binary_a_label.setText(self.results_data.get('binary_a_name', 'N/A'))
+        self.binary_b_label.setText(self.results_data.get('binary_b_name', 'N/A'))
+        self.analysis_time_label.setText(f"{self.results_data.get('analysis_time', 0):.2f}s")
+        
+    def apply_filters(self):
+        """Apply current filters to results"""
+        if not self.all_results:
+            return
+            
+        self.filtered_results = []
+        
+        # Get filter values
+        match_type_filter = self.match_type_combo.currentText()
+        try:
+            similarity_threshold = float(self.similarity_threshold.text())
+        except ValueError:
+            similarity_threshold = 0.0
+            
+        try:
+            confidence_threshold = float(self.confidence_threshold.text())
+        except ValueError:
+            confidence_threshold = 0.0
+            
+        function_name_filter = self.function_name_filter.text().lower()
+        
+        # Apply filters
+        for result in self.all_results:
+            # Match type filter
+            if match_type_filter != "All" and result.get('match_type') != match_type_filter:
+                continue
+                
+            # Similarity threshold
+            if result.get('similarity', 0) < similarity_threshold:
+                continue
+                
+            # Confidence threshold
+            if result.get('confidence', 0) < confidence_threshold:
+                continue
+                
+            # Function name filter
+            if function_name_filter:
+                func_a_name = result.get('function_a', {}).get('name', '').lower()
+                func_b_name = result.get('function_b', {}).get('name', '').lower()
+                if function_name_filter not in func_a_name and function_name_filter not in func_b_name:
+                    continue
+                    
+            self.filtered_results.append(result)
+            
+        self.update_table()
+        
+    def reset_filters(self):
+        """Reset all filters to default values"""
+        self.match_type_combo.setCurrentText("All")
+        self.similarity_threshold.setText("0.0")
+        self.confidence_threshold.setText("0.0")
+        self.function_name_filter.setText("")
+        self.apply_filters()
+        
+    def export_to_csv(self):
+        """Export filtered results to CSV"""
+        filename, _ = QFileDialog.getSaveFileName(self, "Export to CSV", "", "CSV Files (*.csv)")
+        if not filename:
+            return
+            
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                
+                # Write header
+                writer.writerow([
+                    'Function A', 'Address A', 'Function B', 'Address B',
+                    'Similarity', 'Confidence', 'Match Type', 'Size A', 'Size B',
+                    'BB Count A', 'BB Count B', 'Instr Count A', 'Instr Count B'
+                ])
+                
+                # Write data
+                for result in self.filtered_results:
+                    func_a = result.get('function_a', {})
+                    func_b = result.get('function_b', {})
+                    
+                    writer.writerow([
+                        func_a.get('name', ''),
+                        f"0x{func_a.get('address', 0):x}",
+                        func_b.get('name', ''),
+                        f"0x{func_b.get('address', 0):x}",
+                        f"{result.get('similarity', 0):.4f}",
+                        f"{result.get('confidence', 0):.4f}",
+                        result.get('match_type', ''),
+                        func_a.get('size', 0),
+                        func_b.get('size', 0),
+                        len(func_a.get('basic_blocks', [])),
+                        len(func_b.get('basic_blocks', [])),
+                        len(func_a.get('instructions', [])),
+                        len(func_b.get('instructions', []))
+                    ])
+                    
+            QMessageBox.information(self, "Export Complete", f"Results exported to {filename}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export CSV: {str(e)}")
+            
+    def export_to_sqlite(self):
+        """Export filtered results to SQLite database"""
+        filename, _ = QFileDialog.getSaveFileName(self, "Export to SQLite", "", "SQLite Files (*.db)")
+        if not filename:
+            return
+            
+        try:
+            conn = sqlite3.connect(filename)
+            cursor = conn.cursor()
+            
+            # Create table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS function_matches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    function_a_name TEXT,
+                    function_a_address INTEGER,
+                    function_b_name TEXT,
+                    function_b_address INTEGER,
+                    similarity REAL,
+                    confidence REAL,
+                    match_type TEXT,
+                    size_a INTEGER,
+                    size_b INTEGER,
+                    bb_count_a INTEGER,
+                    bb_count_b INTEGER,
+                    instr_count_a INTEGER,
+                    instr_count_b INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Insert data
+            for result in self.filtered_results:
+                func_a = result.get('function_a', {})
+                func_b = result.get('function_b', {})
+                
+                cursor.execute('''
+                    INSERT INTO function_matches 
+                    (function_a_name, function_a_address, function_b_name, function_b_address,
+                     similarity, confidence, match_type, size_a, size_b, bb_count_a, bb_count_b,
+                     instr_count_a, instr_count_b)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    func_a.get('name', ''),
+                    func_a.get('address', 0),
+                    func_b.get('name', ''),
+                    func_b.get('address', 0),
+                    result.get('similarity', 0),
+                    result.get('confidence', 0),
+                    result.get('match_type', ''),
+                    func_a.get('size', 0),
+                    func_b.get('size', 0),
+                    len(func_a.get('basic_blocks', [])),
+                    len(func_b.get('basic_blocks', [])),
+                    len(func_a.get('instructions', [])),
+                    len(func_b.get('instructions', []))
+                ))
+            
+            conn.commit()
+            conn.close()
+            
+            QMessageBox.information(self, "Export Complete", f"Results exported to {filename}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export SQLite: {str(e)}")
+            
+    def export_to_json(self):
+        """Export filtered results to JSON"""
+        filename, _ = QFileDialog.getSaveFileName(self, "Export to JSON", "", "JSON Files (*.json)")
+        if not filename:
+            return
+            
+        try:
+            export_data = {
+                'metadata': {
+                    'export_time': datetime.now().isoformat(),
+                    'total_results': len(self.filtered_results),
+                    'binary_a': self.results_data.get('binary_a_name', ''),
+                    'binary_b': self.results_data.get('binary_b_name', ''),
+                },
+                'results': self.filtered_results
+            }
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(export_data, f, indent=2, ensure_ascii=False)
+                
+            QMessageBox.information(self, "Export Complete", f"Results exported to {filename}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export JSON: {str(e)}")
+            
+    def export_to_html(self):
+        """Export filtered results to HTML"""
+        filename, _ = QFileDialog.getSaveFileName(self, "Export to HTML", "", "HTML Files (*.html)")
+        if not filename:
+            return
+            
+        try:
+            html_content = self.generate_html_report()
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+                
+            QMessageBox.information(self, "Export Complete", f"Results exported to {filename}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export HTML: {str(e)}")
+            
+    def generate_html_report(self):
+        """Generate HTML report of results"""
+        html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Binary Diff Results</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        .header {{ background-color: #f0f0f0; padding: 20px; margin-bottom: 20px; }}
+        .summary {{ background-color: #e8f4f8; padding: 15px; margin-bottom: 20px; }}
+        table {{ border-collapse: collapse; width: 100%; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .exact {{ background-color: #90EE90; color: #006400; }}
+        .structural {{ background-color: #FFD700; color: #8B4513; }}
+        .heuristic {{ background-color: #FFB6C1; color: #8B0000; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Binary Diff Results</h1>
+        <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    </div>
+    
+    <div class="summary">
+        <h2>Summary</h2>
+        <p><strong>Binary A:</strong> {self.results_data.get('binary_a_name', 'N/A')}</p>
+        <p><strong>Binary B:</strong> {self.results_data.get('binary_b_name', 'N/A')}</p>
+        <p><strong>Total Matches:</strong> {len(self.filtered_results)}</p>
+        <p><strong>Analysis Time:</strong> {self.results_data.get('analysis_time', 0):.2f} seconds</p>
+    </div>
+    
+    <table>
+        <tr>
+            <th>Function A</th>
+            <th>Address A</th>
+            <th>Function B</th>
+            <th>Address B</th>
+            <th>Similarity</th>
+            <th>Confidence</th>
+            <th>Match Type</th>
+        </tr>
+        {self.generate_html_table_rows()}
+    </table>
+</body>
+</html>
+        """
+        return html
+        
+    def generate_html_table_rows(self):
+        """Generate HTML table rows for results"""
+        rows = ""
+        for result in self.filtered_results:
+            func_a = result.get('function_a', {})
+            func_b = result.get('function_b', {})
+            match_type = result.get('match_type', '')
+            
+            css_class = match_type.lower() if match_type.lower() in ['exact', 'structural', 'heuristic'] else ''
+            
+            rows += f'''
+        <tr class="{css_class}">
+            <td>{func_a.get('name', '')}</td>
+            <td>0x{func_a.get('address', 0):x}</td>
+            <td>{func_b.get('name', '')}</td>
+            <td>0x{func_b.get('address', 0):x}</td>
+            <td>{result.get('similarity', 0):.4f}</td>
+            <td>{result.get('confidence', 0):.4f}</td>
+            <td>{match_type}</td>
+        </tr>
+            '''
+        return rows
+
+
+def show_diff_results(results_data):
+    """Show the diff results in a Qt window"""
+    try:
+        # Get existing QApplication instance or create new one
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication([])
+        
+        window = DiffResultsWindow(results_data)
+        window.show()
+        
+        # Make sure the window stays alive
+        if not hasattr(show_diff_results, '_windows'):
+            show_diff_results._windows = []
+        show_diff_results._windows.append(window)
+        
+        return window
+    except Exception as e:
+        print(f"Error showing Qt GUI: {e}")
+        return None
+
+
+# Test function
+if __name__ == "__main__":
+    # Mock data for testing
+    mock_data = {
+        'binary_a_name': 'binary_a.exe',
+        'binary_b_name': 'binary_b.exe',
+        'analysis_time': 1.23,
+        'matched_functions': [
+            {
+                'function_a': {'name': 'main', 'address': 0x1000, 'size': 200, 'basic_blocks': [{}], 'instructions': [{}]},
+                'function_b': {'name': 'main', 'address': 0x2000, 'size': 200, 'basic_blocks': [{}], 'instructions': [{}]},
+                'similarity': 0.95,
+                'confidence': 0.98,
+                'match_type': 'Exact'
+            },
+            {
+                'function_a': {'name': 'printf', 'address': 0x1200, 'size': 50, 'basic_blocks': [{}], 'instructions': [{}]},
+                'function_b': {'name': 'printf', 'address': 0x2200, 'size': 50, 'basic_blocks': [{}], 'instructions': [{}]},
+                'similarity': 0.80,
+                'confidence': 0.85,
+                'match_type': 'Structural'
+            }
+        ],
+        'unmatched_functions_a': [],
+        'unmatched_functions_b': []
+    }
+    
+    app = QApplication(sys.argv)
+    window = DiffResultsWindow(mock_data)
+    window.show()
+    
+    # Handle different exec method names between PySide6 and PySide2
+    if PYSIDE_VERSION == 6:
+        sys.exit(app.exec())
+    else:
+        sys.exit(app.exec_())
