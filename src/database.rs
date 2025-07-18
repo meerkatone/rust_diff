@@ -184,9 +184,9 @@ impl DatabaseManager {
         th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
         th {{ background-color: #4CAF50; color: white; }}
         tr:nth-child(even) {{ background-color: #f2f2f2; }}
-        .exact {{ background-color: #90EE90; color: #006400; }}
-        .structural {{ background-color: #FFD700; color: #8B4513; }}
-        .heuristic {{ background-color: #FFB6C1; color: #8B0000; }}
+        .high-confidence {{ background-color: #90EE90; color: #006400; }}
+        .medium-confidence {{ background-color: #FFD700; color: #8B4513; }}
+        .low-confidence {{ background-color: #FFB6C1; color: #8B0000; }}
     </style>
 </head>
 <body>
@@ -246,11 +246,12 @@ impl DatabaseManager {
         let mut rows = String::new();
         
         for match_result in matches {
-            let class = match match_result.match_type {
-                crate::MatchType::Exact => "exact",
-                crate::MatchType::Structural => "structural",
-                crate::MatchType::Heuristic => "heuristic",
-                crate::MatchType::Manual => "manual",
+            let class = if match_result.confidence >= 0.67 {
+                "high-confidence"
+            } else if match_result.confidence >= 0.34 {
+                "medium-confidence"
+            } else {
+                "low-confidence"
             };
             
             rows.push_str(&format!(

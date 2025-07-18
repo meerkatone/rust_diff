@@ -92,26 +92,24 @@ class DiffResultsTableModel(QAbstractTableModel):
                 return str(len(result.get('function_b', {}).get('instructions', [])))
         
         elif role == Qt.BackgroundRole:
-            # Color code by match type with darker colors
-            match_type = result.get('match_type', '')
-            if match_type == 'Exact':
-                return QColor(144, 238, 144)  # Darker green
-            elif match_type == 'Structural':
-                return QColor(255, 215, 0)    # Darker amber/gold
-            elif match_type == 'Heuristic':
-                return QColor(255, 182, 193)  # Darker red
+            # Color code by confidence score
+            confidence = result.get('confidence', 0)
+            if confidence >= 0.67:
+                return QColor(144, 238, 144)  # Green for high confidence
+            elif confidence >= 0.34:
+                return QColor(255, 215, 0)    # Yellow for medium confidence
+            else:
+                return QColor(255, 182, 193)  # Red for low confidence
                 
         elif role == Qt.TextColorRole:
             # Set text color for better contrast
-            match_type = result.get('match_type', '')
-            if match_type == 'Exact':
+            confidence = result.get('confidence', 0)
+            if confidence >= 0.67:
                 return QColor(0, 100, 0)      # Dark green text
-            elif match_type == 'Structural':
+            elif confidence >= 0.34:
                 return QColor(139, 69, 19)    # Dark brown text
-            elif match_type == 'Heuristic':
-                return QColor(139, 0, 0)      # Dark red text
             else:
-                return QColor(0, 0, 0)        # Black text for default
+                return QColor(139, 0, 0)      # Dark red text
                 
         return None
     
@@ -164,6 +162,8 @@ class DiffResultsWindow(QMainWindow):
         super().__init__()
         self.results_data = results_data or {}
         self.filtered_results = []
+        self.sort_column = -1
+        self.sort_order = Qt.AscendingOrder
         self.setup_ui()
         self.load_results()
         
@@ -242,10 +242,13 @@ class DiffResultsWindow(QMainWindow):
         # Results table
         self.table_model = DiffResultsTableModel()
         self.table_view = QTableWidget()
-        self.table_view.setSortingEnabled(True)
+        self.table_view.setSortingEnabled(False)  # Disable built-in sorting to use custom sorting
         self.table_view.setAlternatingRowColors(True)
         self.table_view.setSelectionBehavior(QTableWidget.SelectRows)
         self.table_view.horizontalHeader().setStretchLastSection(True)
+        
+        # Enable custom sorting for numeric columns
+        self.table_view.horizontalHeader().sectionClicked.connect(self.sort_table)
         
         layout.addWidget(self.table_view)
         
@@ -400,34 +403,80 @@ class DiffResultsWindow(QMainWindow):
             func_a = result.get('function_a', {})
             func_b = result.get('function_b', {})
             
+            # Column 0: Function A name (string)
             self.table_view.setItem(row, 0, QTableWidgetItem(func_a.get('name', '')))
-            self.table_view.setItem(row, 1, QTableWidgetItem(f"0x{func_a.get('address', 0):x}"))
-            self.table_view.setItem(row, 2, QTableWidgetItem(func_b.get('name', '')))
-            self.table_view.setItem(row, 3, QTableWidgetItem(f"0x{func_b.get('address', 0):x}"))
-            self.table_view.setItem(row, 4, QTableWidgetItem(f"{result.get('similarity', 0):.4f}"))
-            self.table_view.setItem(row, 5, QTableWidgetItem(f"{result.get('confidence', 0):.4f}"))
-            self.table_view.setItem(row, 6, QTableWidgetItem(result.get('match_type', '')))
-            self.table_view.setItem(row, 7, QTableWidgetItem(str(func_a.get('size', 0))))
-            self.table_view.setItem(row, 8, QTableWidgetItem(str(func_b.get('size', 0))))
-            self.table_view.setItem(row, 9, QTableWidgetItem(str(len(func_a.get('basic_blocks', [])))))
-            self.table_view.setItem(row, 10, QTableWidgetItem(str(len(func_b.get('basic_blocks', [])))))
-            self.table_view.setItem(row, 11, QTableWidgetItem(str(len(func_a.get('instructions', [])))))
-            self.table_view.setItem(row, 12, QTableWidgetItem(str(len(func_b.get('instructions', [])))))
             
-            # Color code rows by match type with darker colors and better contrast
-            match_type = result.get('match_type', '')
-            if match_type == 'Exact':
-                bg_color = QColor(144, 238, 144)  # Darker green
+            # Column 1: Address A (numeric)
+            addr_a_item = QTableWidgetItem(f"0x{func_a.get('address', 0):x}")
+            addr_a_item.setData(Qt.UserRole, func_a.get('address', 0))
+            self.table_view.setItem(row, 1, addr_a_item)
+            
+            # Column 2: Function B name (string)
+            self.table_view.setItem(row, 2, QTableWidgetItem(func_b.get('name', '')))
+            
+            # Column 3: Address B (numeric)
+            addr_b_item = QTableWidgetItem(f"0x{func_b.get('address', 0):x}")
+            addr_b_item.setData(Qt.UserRole, func_b.get('address', 0))
+            self.table_view.setItem(row, 3, addr_b_item)
+            
+            # Column 4: Similarity (numeric)
+            similarity_item = QTableWidgetItem(f"{result.get('similarity', 0):.4f}")
+            similarity_item.setData(Qt.UserRole, result.get('similarity', 0))
+            self.table_view.setItem(row, 4, similarity_item)
+            
+            # Column 5: Confidence (numeric)
+            confidence_item = QTableWidgetItem(f"{result.get('confidence', 0):.4f}")
+            confidence_item.setData(Qt.UserRole, result.get('confidence', 0))
+            self.table_view.setItem(row, 5, confidence_item)
+            
+            # Column 6: Match Type (string)
+            self.table_view.setItem(row, 6, QTableWidgetItem(result.get('match_type', '')))
+            
+            # Column 7: Size A (numeric)
+            size_a_item = QTableWidgetItem(str(func_a.get('size', 0)))
+            size_a_item.setData(Qt.UserRole, func_a.get('size', 0))
+            self.table_view.setItem(row, 7, size_a_item)
+            
+            # Column 8: Size B (numeric)
+            size_b_item = QTableWidgetItem(str(func_b.get('size', 0)))
+            size_b_item.setData(Qt.UserRole, func_b.get('size', 0))
+            self.table_view.setItem(row, 8, size_b_item)
+            
+            # Column 9: BB Count A (numeric)
+            bb_a_count = len(func_a.get('basic_blocks', []))
+            bb_a_item = QTableWidgetItem(str(bb_a_count))
+            bb_a_item.setData(Qt.UserRole, bb_a_count)
+            self.table_view.setItem(row, 9, bb_a_item)
+            
+            # Column 10: BB Count B (numeric)
+            bb_b_count = len(func_b.get('basic_blocks', []))
+            bb_b_item = QTableWidgetItem(str(bb_b_count))
+            bb_b_item.setData(Qt.UserRole, bb_b_count)
+            self.table_view.setItem(row, 10, bb_b_item)
+            
+            # Column 11: Instr Count A (numeric)
+            instr_a_count = len(func_a.get('instructions', []))
+            instr_a_item = QTableWidgetItem(str(instr_a_count))
+            instr_a_item.setData(Qt.UserRole, instr_a_count)
+            self.table_view.setItem(row, 11, instr_a_item)
+            
+            # Column 12: Instr Count B (numeric)
+            instr_b_count = len(func_b.get('instructions', []))
+            instr_b_item = QTableWidgetItem(str(instr_b_count))
+            instr_b_item.setData(Qt.UserRole, instr_b_count)
+            self.table_view.setItem(row, 12, instr_b_item)
+            
+            # Color code rows by confidence score
+            confidence = result.get('confidence', 0)
+            if confidence >= 0.67:
+                bg_color = QColor(144, 238, 144)  # Green for high confidence
                 text_color = QColor(0, 100, 0)   # Dark green text
-            elif match_type == 'Structural':
-                bg_color = QColor(255, 215, 0)   # Darker amber/gold
+            elif confidence >= 0.34:
+                bg_color = QColor(255, 215, 0)   # Yellow for medium confidence
                 text_color = QColor(139, 69, 19) # Dark brown text
-            elif match_type == 'Heuristic':
-                bg_color = QColor(255, 182, 193) # Darker red
-                text_color = QColor(139, 0, 0)   # Dark red text
             else:
-                bg_color = QColor(255, 255, 255) # White
-                text_color = QColor(0, 0, 0)     # Black text
+                bg_color = QColor(255, 182, 193) # Red for low confidence
+                text_color = QColor(139, 0, 0)   # Dark red text
                 
             for col in range(13):
                 item = self.table_view.item(row, col)
@@ -531,6 +580,101 @@ class DiffResultsWindow(QMainWindow):
         self.confidence_threshold.setText("0.0")
         self.function_name_filter.setText("")
         self.apply_filters()
+        
+    def sort_table(self, column):
+        """Custom sorting function for proper numeric sorting"""
+        # Toggle sort order if clicking same column
+        if self.sort_column == column:
+            self.sort_order = Qt.DescendingOrder if self.sort_order == Qt.AscendingOrder else Qt.AscendingOrder
+        else:
+            self.sort_order = Qt.AscendingOrder
+            
+        self.sort_column = column
+        
+        # Numeric columns that need special sorting
+        numeric_columns = [1, 3, 4, 5, 7, 8, 9, 10, 11, 12]  # Addresses, similarity, confidence, sizes, counts
+        
+        if column in numeric_columns:
+            # Sort by numeric value stored in UserRole
+            self.filtered_results.sort(
+                key=lambda x: self.get_numeric_sort_key(x, column),
+                reverse=(self.sort_order == Qt.DescendingOrder)
+            )
+        else:
+            # Sort by string value (function names, match type)
+            self.filtered_results.sort(
+                key=lambda x: self.get_string_sort_key(x, column),
+                reverse=(self.sort_order == Qt.DescendingOrder)
+            )
+        
+        # Refresh the table with sorted data
+        self.update_table()
+        
+        # Update header to show sort indicator
+        self.update_sort_indicator()
+        
+    def get_numeric_sort_key(self, result, column):
+        """Get numeric sort key for a result"""
+        func_a = result.get('function_a', {})
+        func_b = result.get('function_b', {})
+        
+        if column == 1:  # Address A
+            return func_a.get('address', 0)
+        elif column == 3:  # Address B
+            return func_b.get('address', 0)
+        elif column == 4:  # Similarity
+            return result.get('similarity', 0)
+        elif column == 5:  # Confidence
+            return result.get('confidence', 0)
+        elif column == 7:  # Size A
+            return func_a.get('size', 0)
+        elif column == 8:  # Size B
+            return func_b.get('size', 0)
+        elif column == 9:  # BB Count A
+            return len(func_a.get('basic_blocks', []))
+        elif column == 10:  # BB Count B
+            return len(func_b.get('basic_blocks', []))
+        elif column == 11:  # Instr Count A
+            return len(func_a.get('instructions', []))
+        elif column == 12:  # Instr Count B
+            return len(func_b.get('instructions', []))
+        else:
+            return 0
+            
+    def get_string_sort_key(self, result, column):
+        """Get string sort key for a result"""
+        func_a = result.get('function_a', {})
+        func_b = result.get('function_b', {})
+        
+        if column == 0:  # Function A name
+            return func_a.get('name', '').lower()
+        elif column == 2:  # Function B name
+            return func_b.get('name', '').lower()
+        elif column == 6:  # Match Type
+            return result.get('match_type', '').lower()
+        else:
+            return ''
+    
+    def update_sort_indicator(self):
+        """Update the header to show sort direction indicator"""
+        if self.sort_column >= 0:
+            # Get the current headers
+            headers = [
+                "Function A", "Address A", "Function B", "Address B", 
+                "Similarity", "Confidence", "Match Type", "Size A", "Size B",
+                "BB Count A", "BB Count B", "Instr Count A", "Instr Count B"
+            ]
+            
+            # Add sort indicator to the current sort column
+            for i, header in enumerate(headers):
+                if i == self.sort_column:
+                    if self.sort_order == Qt.AscendingOrder:
+                        headers[i] = f"{header} ↑"
+                    else:
+                        headers[i] = f"{header} ↓"
+                        
+            # Update the headers
+            self.table_view.setHorizontalHeaderLabels(headers)
         
     def export_to_csv(self):
         """Export filtered results to CSV"""
@@ -697,9 +841,9 @@ class DiffResultsWindow(QMainWindow):
         th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
         th {{ background-color: #4CAF50; color: white; }}
         tr:nth-child(even) {{ background-color: #f2f2f2; }}
-        .exact {{ background-color: #90EE90; color: #006400; }}
-        .structural {{ background-color: #FFD700; color: #8B4513; }}
-        .heuristic {{ background-color: #FFB6C1; color: #8B0000; }}
+        .high-confidence {{ background-color: #90EE90; color: #006400; }}
+        .medium-confidence {{ background-color: #FFD700; color: #8B4513; }}
+        .low-confidence {{ background-color: #FFB6C1; color: #8B0000; }}
     </style>
 </head>
 <body>
@@ -739,9 +883,14 @@ class DiffResultsWindow(QMainWindow):
         for result in self.filtered_results:
             func_a = result.get('function_a', {})
             func_b = result.get('function_b', {})
-            match_type = result.get('match_type', '')
+            confidence = result.get('confidence', 0)
             
-            css_class = match_type.lower() if match_type.lower() in ['exact', 'structural', 'heuristic'] else ''
+            if confidence >= 0.67:
+                css_class = 'high-confidence'
+            elif confidence >= 0.34:
+                css_class = 'medium-confidence'
+            else:
+                css_class = 'low-confidence'
             
             rows += f'''
         <tr class="{css_class}">
@@ -751,7 +900,7 @@ class DiffResultsWindow(QMainWindow):
             <td>0x{func_b.get('address', 0):x}</td>
             <td>{result.get('similarity', 0):.4f}</td>
             <td>{result.get('confidence', 0):.4f}</td>
-            <td>{match_type}</td>
+            <td>{result.get('match_type', '')}</td>
         </tr>
             '''
         return rows
