@@ -741,12 +741,13 @@ def run_binary_diff(bv):
                     gui_results = convert_results_to_gui_format(sorted_results, bv, target_bv)
                     
                     # Show GUI directly in main thread (Binary Ninja can handle this)
-                    window = show_diff_results(gui_results)
+                    window = show_diff_results(gui_results, bv, target_bv)
                     
                     if window:
                         log_info("Qt GUI window opened for detailed results")
                         log_info("Features available:")
                         log_info("  - Sort columns by clicking headers")
+                        log_info("  - Click on addresses to navigate Binary Ninja view")
                         log_info("  - Filter by match type, similarity, confidence")
                         log_info("  - Export to CSV, SQLite, JSON, HTML")
                         log_info("  - View summary statistics")

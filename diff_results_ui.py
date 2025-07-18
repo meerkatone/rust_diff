@@ -92,24 +92,15 @@ class DiffResultsTableModel(QAbstractTableModel):
                 return str(len(result.get('function_b', {}).get('instructions', [])))
         
         elif role == Qt.BackgroundRole:
-            # Color code by confidence score
-            confidence = result.get('confidence', 0)
-            if confidence >= 0.67:
-                return QColor(144, 238, 144)  # Green for high confidence
-            elif confidence >= 0.34:
-                return QColor(255, 215, 0)    # Yellow for medium confidence
-            else:
-                return QColor(255, 182, 193)  # Red for low confidence
+            # Use default dark background for all columns
+            return QColor(43, 43, 43)  # Dark gray background
                 
         elif role == Qt.TextColorRole:
-            # Set text color for better contrast
-            confidence = result.get('confidence', 0)
-            if confidence >= 0.67:
-                return QColor(0, 100, 0)      # Dark green text
-            elif confidence >= 0.34:
-                return QColor(139, 69, 19)    # Dark brown text
+            # Set text color - white for all columns except address links
+            if column in [1, 3]:  # Address columns (clickable links)
+                return QColor(100, 149, 237)  # Light blue for clickable links
             else:
-                return QColor(139, 0, 0)      # Dark red text
+                return QColor(255, 255, 255)  # White text for all columns
                 
         return None
     
@@ -158,12 +149,14 @@ class DiffResultsTableModel(QAbstractTableModel):
 class DiffResultsWindow(QMainWindow):
     """Main window for displaying diff results"""
     
-    def __init__(self, results_data=None):
+    def __init__(self, results_data=None, binary_view_a=None, binary_view_b=None):
         super().__init__()
         self.results_data = results_data or {}
         self.filtered_results = []
         self.sort_column = -1
         self.sort_order = Qt.AscendingOrder
+        self.binary_view_a = binary_view_a  # Binary Ninja view for binary A
+        self.binary_view_b = binary_view_b  # Binary Ninja view for binary B
         self.setup_ui()
         self.load_results()
         
@@ -243,12 +236,45 @@ class DiffResultsWindow(QMainWindow):
         self.table_model = DiffResultsTableModel()
         self.table_view = QTableWidget()
         self.table_view.setSortingEnabled(False)  # Disable built-in sorting to use custom sorting
-        self.table_view.setAlternatingRowColors(True)
+        self.table_view.setAlternatingRowColors(False)  # Disable to allow custom background colors
         self.table_view.setSelectionBehavior(QTableWidget.SelectRows)
         self.table_view.horizontalHeader().setStretchLastSection(True)
         
+        # Set table styling for better contrast with white text
+        self.table_view.setStyleSheet("""
+            QTableWidget {
+                background-color: #2b2b2b;
+                gridline-color: #555555;
+                color: white;
+                selection-background-color: #3daee9;
+            }
+            QTableWidget::item {
+                padding: 12px 8px;
+                border: 1px solid #555555;
+                min-height: 32px;
+            }
+            QTableWidget::item:selected {
+                background-color: #3daee9;
+            }
+            QHeaderView::section {
+                background-color: #404040;
+                color: white;
+                padding: 12px 8px;
+                border: 1px solid #555555;
+                font-weight: bold;
+                min-height: 36px;
+            }
+        """)
+        
+        # Set minimum row height to prevent content from being cut off
+        self.table_view.verticalHeader().setDefaultSectionSize(40)
+        self.table_view.verticalHeader().setMinimumSectionSize(35)
+        
         # Enable custom sorting for numeric columns
         self.table_view.horizontalHeader().sectionClicked.connect(self.sort_table)
+        
+        # Enable address clicking to sync Binary Ninja view
+        self.table_view.cellClicked.connect(self.on_cell_clicked)
         
         layout.addWidget(self.table_view)
         
@@ -406,17 +432,29 @@ class DiffResultsWindow(QMainWindow):
             # Column 0: Function A name (string)
             self.table_view.setItem(row, 0, QTableWidgetItem(func_a.get('name', '')))
             
-            # Column 1: Address A (numeric)
+            # Column 1: Address A (numeric, clickable)
             addr_a_item = QTableWidgetItem(f"0x{func_a.get('address', 0):x}")
             addr_a_item.setData(Qt.UserRole, func_a.get('address', 0))
+            # Make address clickable by changing font to underlined
+            font = addr_a_item.font()
+            font.setUnderline(True)
+            addr_a_item.setFont(font)
+            addr_a_item.setForeground(QColor(100, 149, 237))  # Light blue color for clickable link
+            addr_a_item.setToolTip("Click to navigate to this address in Binary Ninja")
             self.table_view.setItem(row, 1, addr_a_item)
             
             # Column 2: Function B name (string)
             self.table_view.setItem(row, 2, QTableWidgetItem(func_b.get('name', '')))
             
-            # Column 3: Address B (numeric)
+            # Column 3: Address B (numeric, clickable)
             addr_b_item = QTableWidgetItem(f"0x{func_b.get('address', 0):x}")
             addr_b_item.setData(Qt.UserRole, func_b.get('address', 0))
+            # Make address clickable by changing font to underlined
+            font = addr_b_item.font()
+            font.setUnderline(True)
+            addr_b_item.setFont(font)
+            addr_b_item.setForeground(QColor(100, 149, 237))  # Light blue color for clickable link
+            addr_b_item.setToolTip("Click to navigate to this address in Binary Ninja")
             self.table_view.setItem(row, 3, addr_b_item)
             
             # Column 4: Similarity (numeric)
@@ -466,26 +504,27 @@ class DiffResultsWindow(QMainWindow):
             instr_b_item.setData(Qt.UserRole, instr_b_count)
             self.table_view.setItem(row, 12, instr_b_item)
             
-            # Color code rows by confidence score
-            confidence = result.get('confidence', 0)
-            if confidence >= 0.67:
-                bg_color = QColor(144, 238, 144)  # Green for high confidence
-                text_color = QColor(0, 100, 0)   # Dark green text
-            elif confidence >= 0.34:
-                bg_color = QColor(255, 215, 0)   # Yellow for medium confidence
-                text_color = QColor(139, 69, 19) # Dark brown text
-            else:
-                bg_color = QColor(255, 182, 193) # Red for low confidence
-                text_color = QColor(139, 0, 0)   # Dark red text
-                
+        # Apply consistent styling after all items are created
+        for row in range(len(self.filtered_results)):
             for col in range(13):
                 item = self.table_view.item(row, col)
                 if item:
-                    item.setBackground(bg_color)
-                    item.setForeground(text_color)
+                    # Use default dark background for all columns
+                    item.setBackground(QColor(43, 43, 43))  # Dark gray background
+                    
+                    # Set text color - white for all columns except address links
+                    if col in [1, 3]:  # Address columns remain blue (clickable links)
+                        # Address links keep their blue color (already set above)
+                        pass
+                    else:
+                        item.setForeground(QColor(255, 255, 255))  # White text for all columns
         
         # Resize columns to content
         self.table_view.resizeColumnsToContents()
+        
+        # Ensure proper row height for all rows
+        for row in range(self.table_view.rowCount()):
+            self.table_view.setRowHeight(row, 40)
         
         # Update status
         self.results_count_label.setText(f"{len(self.filtered_results)} results")
@@ -675,6 +714,77 @@ class DiffResultsWindow(QMainWindow):
                         
             # Update the headers
             self.table_view.setHorizontalHeaderLabels(headers)
+    
+    def on_cell_clicked(self, row, column):
+        """Handle cell clicks, especially for address columns"""
+        # Check if clicked column is an address column (Address A or Address B)
+        if column in [1, 3]:  # Address A or Address B
+            try:
+                # Get the result for this row
+                if row < len(self.filtered_results):
+                    result = self.filtered_results[row]
+                    
+                    if column == 1:  # Address A
+                        address = result.get('function_a', {}).get('address', 0)
+                        binary_view = self.binary_view_a
+                        binary_name = "Binary A"
+                    else:  # Address B
+                        address = result.get('function_b', {}).get('address', 0)
+                        binary_view = self.binary_view_b
+                        binary_name = "Binary B"
+                    
+                    if binary_view and address:
+                        # Navigate to the address in Binary Ninja
+                        self.navigate_to_address(binary_view, address, binary_name)
+                    elif not binary_view:
+                        # Show message if Binary Ninja view is not available
+                        QMessageBox.information(
+                            self, 
+                            "Binary Ninja Navigation", 
+                            f"Cannot navigate to address: {binary_name} view not available.\n"
+                            f"Address: 0x{address:x}"
+                        )
+                    else:
+                        # Show message if address is invalid
+                        QMessageBox.warning(
+                            self, 
+                            "Binary Ninja Navigation", 
+                            f"Invalid address: 0x{address:x}"
+                        )
+                        
+            except Exception as e:
+                # Show error message
+                QMessageBox.critical(
+                    self, 
+                    "Binary Ninja Navigation Error", 
+                    f"Failed to navigate to address: {str(e)}"
+                )
+    
+    def navigate_to_address(self, binary_view, address, binary_name):
+        """Navigate to the specified address in Binary Ninja"""
+        try:
+            # Check if the address is valid
+            if address == 0:
+                QMessageBox.warning(
+                    self, 
+                    "Binary Ninja Navigation", 
+                    f"Invalid address: 0x{address:x}"
+                )
+                return
+                
+            # Navigate to the address
+            binary_view.navigate(binary_view.view, address)
+            
+            # Show confirmation message in status bar
+            self.status_label.setText(f"Navigated to 0x{address:x} in {binary_name}")
+            
+        except Exception as e:
+            # Show error message
+            QMessageBox.critical(
+                self, 
+                "Binary Ninja Navigation Error", 
+                f"Failed to navigate to address 0x{address:x}: {str(e)}"
+            )
         
     def export_to_csv(self):
         """Export filtered results to CSV"""
@@ -906,7 +1016,7 @@ class DiffResultsWindow(QMainWindow):
         return rows
 
 
-def show_diff_results(results_data):
+def show_diff_results(results_data, binary_view_a=None, binary_view_b=None):
     """Show the diff results in a Qt window"""
     try:
         # Get existing QApplication instance or create new one
@@ -914,7 +1024,7 @@ def show_diff_results(results_data):
         if app is None:
             app = QApplication([])
         
-        window = DiffResultsWindow(results_data)
+        window = DiffResultsWindow(results_data, binary_view_a, binary_view_b)
         window.show()
         
         # Make sure the window stays alive
