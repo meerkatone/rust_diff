@@ -1,5 +1,4 @@
-use crate::{FunctionInfo, BasicBlockInfo, InstructionInfo, FunctionMatch, MatchType};
-use anyhow::Result;
+use crate::FunctionInfo;
 use std::collections::HashMap;
 use rustc_hash::FxHashSet;
 

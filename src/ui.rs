@@ -1,5 +1,4 @@
 use crate::{DiffResult, FunctionMatch, MatchType};
-use anyhow::Result;
 use std::collections::HashMap;
 
 pub struct DiffUI;

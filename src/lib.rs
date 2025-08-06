@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::Arc;
 use std::time::Instant;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use anyhow::{Result, Context};
-use log::{info, error, debug, warn};
+use log::{info, error};
 use serde::{Serialize, Deserialize};
-use sha2::{Sha256, Digest};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use parking_lot::RwLock;

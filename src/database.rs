@@ -1,10 +1,8 @@
-use crate::{FunctionInfo, BasicBlockInfo, InstructionInfo, FunctionMatch, DiffResult};
+use crate::{FunctionInfo, FunctionMatch, DiffResult};
 use anyhow::{Result, Context};
 use serde::{Serialize, Deserialize};
 use std::path::Path;
 use std::fs;
-use std::ffi::CString;
-use std::os::raw::c_char;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiffDatabase {

@@ -2,7 +2,6 @@ use crate::{FunctionInfo, BasicBlockInfo, InstructionInfo};
 use std::collections::HashMap;
 use rustc_hash::FxHashSet;
 use petgraph::Graph;
-use petgraph::graph::NodeIndex;
 
 pub struct SimilarityAnalyzer;
 
