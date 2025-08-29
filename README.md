@@ -62,11 +62,3 @@ A high-performance binary diffing plugin for Binary Ninja that compares function
 2. Go to Tools → Binary Diffing (Rust)
 3. Select a target BNDB file to compare against
 4. The plugin will analyze both binaries and display results
-
-## License
-
-Licensed under the Apache License, Version 2.0. See the plugin metadata for full license text.
-
-## Contributing
-
-This plugin is designed for defensive security analysis and binary research. Extensions and improvements to matching algorithms, similarity metrics, and export formats are welcome.
