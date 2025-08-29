@@ -19,34 +19,6 @@ A high-performance binary diffing plugin for Binary Ninja that compares function
 - Python 3.x
 - Optional: PySide6 or PySide2 (for GUI features)
 
-## Clone the repo
-git clone https://github.com/meerkatone/rust_diff.git
-
-## Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-## Install uv
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-Binary Diffing and Marimo Rust
-Marimo notebook to compare and search the binary diffing results using the Rust Diff Plugin for Binary Ninja
-
-git clone https://github.com/meerkatone/binary_diffing_and_marimo_rust.git
-
-## Setup venv and Marimo
-uv venv --python 3.13
-
-source .venv/bin/activate
-
-cd binary-diffing-and-marimo-rust
-
-uv pip install marimo
-
-## Launch the notebook
-marimo edit ./binary_ninja_diffing_rust
-
-The notebook will ask you to install the required dependencies via uv.
-
 ### Building
 ```bash
 # Clone and build the Rust library
