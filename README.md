@@ -4,9 +4,6 @@ A high-performance binary diffing plugin for Binary Ninja that compares function
 
 ## Features
 
-- **Multi-phase matching algorithm**: Exact hash, name-based, structural, and fuzzy matching
-- **Advanced similarity metrics**: Jaccard, cosine similarity, edit distance
-- **Comprehensive analysis**: CFG comparison, basic block analysis, instruction patterns
 - **Multiple export formats**: JSON, CSV, SQLite, HTML reports
 - **Optional Qt GUI**: Interactive results table with sorting and filtering
 - **Cross-platform**: Supports Darwin, Linux, and Windows
@@ -14,26 +11,50 @@ A high-performance binary diffing plugin for Binary Ninja that compares function
 ## Installation
 
 ### Prerequisites
-- Binary Ninja 3.0.0 or higher
-- Rust toolchain (for building from source)
+
+- [Binary Ninja](https://binary.ninja/) (Commercial or Personal license latest dev build)
+- [Rust toolchain](https://rustup.rs/) (latest stable)
+- Binary Ninja API development headers
 - Python 3.x
 - Optional: PySide6 or PySide2 (for GUI features)
 
-### Building
-```bash
-# Clone and build the Rust library
-cargo build --release
+### Build and Install
 
-# Install GUI dependencies (optional)
-pip install PySide6
-# or
-python install_pyside.py
-```
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/meerkatone/rust_diff.git
+   cd rust_diff
+   ```
 
-### Installing in Binary Ninja
-1. Copy the plugin files to your Binary Ninja plugins directory
-2. Restart Binary Ninja
-3. The plugin will appear as "Binary Diffing (Rust)" in the Tools menu
+2. Set up Binary Ninja environment (if needed):
+   ```bash
+   export BINJA_DIR="/path/to/your/binaryninja/installation"
+   ```
+
+3. Build the plugin:
+  ```bash
+  # Clone and build the Rust library
+  cargo build --release
+
+  # Install GUI dependencies (optional)
+  pip install PySide6
+  # or
+  python install_pyside.py
+  ```
+
+4. Copy the compiled plugin to Binary Ninja's plugin directory:
+   ```bash
+   # macOS
+   cp target/release/librust_diff.dylib ~/Library/Application\ Support/Binary\ Ninja/plugins/
+   
+   # Linux
+   cp target/release/librust_diff.so ~/.binaryninja/plugins/
+   
+   # Windows
+   copy target\release\librust_diff.dll %APPDATA%\Binary Ninja\plugins\
+   ```
+
+5. Restart Binary Ninja to load the plugin
 
 ## Usage
 
@@ -41,41 +62,6 @@ python install_pyside.py
 2. Go to Tools → Binary Diffing (Rust)
 3. Select a target BNDB file to compare against
 4. The plugin will analyze both binaries and display results
-
-## Algorithm Overview
-
-The plugin uses a sophisticated multi-phase matching approach:
-
-1. **Exact Hash Matching**: Matches functions with identical CFG and call graph hashes
-2. **Name Matching**: Matches functions with identical names
-3. **MD-Index Matching**: Metadata-based matching similar to Diaphora
-4. **Small Primes Product**: Instruction-based hashing using prime products
-5. **Structural Matching**: CFG isomorphism checking
-6. **Fuzzy Matching**: Similarity-based matching with configurable thresholds
-
-## Output
-
-Results include:
-- Function matches with similarity and confidence scores
-- Match type classification (exact, structural, fuzzy, etc.)
-- Unmatched functions from both binaries
-- Detailed analysis statistics
-- Export options for further analysis
-
-## Configuration
-
-Default similarity thresholds:
-- Similarity threshold: 0.6
-- Confidence threshold: 0.5
-
-These can be adjusted in the `BinaryDiffEngine` constructor for custom analysis requirements.
-
-## Architecture
-
-- **Rust Core**: High-performance matching algorithms and analysis
-- **Python Interface**: Binary Ninja integration and GUI components
-- **FFI Bridge**: C-compatible interface between Rust and Python
-- **Modular Design**: Extensible algorithm and similarity metric system
 
 ## License
 
