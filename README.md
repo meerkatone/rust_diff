@@ -36,6 +36,9 @@ A high-performance binary diffing plugin for Binary Ninja that compares function
   # Clone and build the Rust library
   cargo build --release
 
+  If the plugin fails to load due to an "This plugin was built for an outdated core ABI (XXX). Please rebuild the plugin with the latest API (XXX)." Please use the following to update the dependencies:
+  cargo update && cargo build --release
+
   # Install GUI dependencies (optional)
   pip install PySide6
   # or
