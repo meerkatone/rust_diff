@@ -418,8 +418,8 @@ class DiffResultsWindow(QMainWindow):
         
         # Set headers
         headers = [
-            "Function A", "Address A", "Function B", "Address B", 
-            "Similarity", "Confidence", "Match Type", "Size A", "Size B",
+            "Similarity", "Confidence", "Function A", "Address A", "Function B", "Address B", 
+            "Match Type", "Size A", "Size B",
             "BB Count A", "BB Count B", "Instr Count A", "Instr Count B"
         ]
         self.table_view.setHorizontalHeaderLabels(headers)
@@ -429,10 +429,20 @@ class DiffResultsWindow(QMainWindow):
             func_a = result.get('function_a', {})
             func_b = result.get('function_b', {})
             
-            # Column 0: Function A name (string)
-            self.table_view.setItem(row, 0, QTableWidgetItem(func_a.get('name', '')))
+            # Column 0: Similarity (numeric)
+            similarity_item = QTableWidgetItem(f"{result.get('similarity', 0):.4f}")
+            similarity_item.setData(Qt.UserRole, result.get('similarity', 0))
+            self.table_view.setItem(row, 0, similarity_item)
             
-            # Column 1: Address A (numeric, clickable)
+            # Column 1: Confidence (numeric)
+            confidence_item = QTableWidgetItem(f"{result.get('confidence', 0):.4f}")
+            confidence_item.setData(Qt.UserRole, result.get('confidence', 0))
+            self.table_view.setItem(row, 1, confidence_item)
+
+            # Column 2: Function A name (string)
+            self.table_view.setItem(row, 2, QTableWidgetItem(func_a.get('name', '')))
+            
+            # Column 3: Address A (numeric, clickable)
             addr_a_item = QTableWidgetItem(f"0x{func_a.get('address', 0):x}")
             addr_a_item.setData(Qt.UserRole, func_a.get('address', 0))
             # Make address clickable by changing font to underlined
@@ -441,12 +451,12 @@ class DiffResultsWindow(QMainWindow):
             addr_a_item.setFont(font)
             addr_a_item.setForeground(QColor(100, 149, 237))  # Light blue color for clickable link
             addr_a_item.setToolTip("Click to navigate to this address in Binary Ninja")
-            self.table_view.setItem(row, 1, addr_a_item)
+            self.table_view.setItem(row, 3, addr_a_item)
             
-            # Column 2: Function B name (string)
-            self.table_view.setItem(row, 2, QTableWidgetItem(func_b.get('name', '')))
+            # Column 4: Function B name (string)
+            self.table_view.setItem(row, 4, QTableWidgetItem(func_b.get('name', '')))
             
-            # Column 3: Address B (numeric, clickable)
+            # Column 5: Address B (numeric, clickable)
             addr_b_item = QTableWidgetItem(f"0x{func_b.get('address', 0):x}")
             addr_b_item.setData(Qt.UserRole, func_b.get('address', 0))
             # Make address clickable by changing font to underlined
@@ -455,17 +465,7 @@ class DiffResultsWindow(QMainWindow):
             addr_b_item.setFont(font)
             addr_b_item.setForeground(QColor(100, 149, 237))  # Light blue color for clickable link
             addr_b_item.setToolTip("Click to navigate to this address in Binary Ninja")
-            self.table_view.setItem(row, 3, addr_b_item)
-            
-            # Column 4: Similarity (numeric)
-            similarity_item = QTableWidgetItem(f"{result.get('similarity', 0):.4f}")
-            similarity_item.setData(Qt.UserRole, result.get('similarity', 0))
-            self.table_view.setItem(row, 4, similarity_item)
-            
-            # Column 5: Confidence (numeric)
-            confidence_item = QTableWidgetItem(f"{result.get('confidence', 0):.4f}")
-            confidence_item.setData(Qt.UserRole, result.get('confidence', 0))
-            self.table_view.setItem(row, 5, confidence_item)
+            self.table_view.setItem(row, 5, addr_b_item)
             
             # Column 6: Match Type (string)
             self.table_view.setItem(row, 6, QTableWidgetItem(result.get('match_type', '')))
@@ -513,7 +513,7 @@ class DiffResultsWindow(QMainWindow):
                     item.setBackground(QColor(43, 43, 43))  # Dark gray background
                     
                     # Set text color - white for all columns except address links
-                    if col in [1, 3]:  # Address columns remain blue (clickable links)
+                    if col in [3, 5]:  # Address columns remain blue (clickable links)
                         # Address links keep their blue color (already set above)
                         pass
                     else:
@@ -521,6 +521,10 @@ class DiffResultsWindow(QMainWindow):
         
         # Resize columns to content
         self.table_view.resizeColumnsToContents()
+        
+        # Set specific width for Function A and Function B (approx 30 chars)
+        self.table_view.setColumnWidth(2, 250)  # Function A
+        self.table_view.setColumnWidth(4, 250)  # Function B
         
         # Ensure proper row height for all rows
         for row in range(self.table_view.rowCount()):
@@ -631,7 +635,7 @@ class DiffResultsWindow(QMainWindow):
         self.sort_column = column
         
         # Numeric columns that need special sorting
-        numeric_columns = [1, 3, 4, 5, 7, 8, 9, 10, 11, 12]  # Addresses, similarity, confidence, sizes, counts
+        numeric_columns = [0, 1, 3, 5, 7, 8, 9, 10, 11, 12]  # Addresses, similarity, confidence, sizes, counts
         
         if column in numeric_columns:
             # Sort by numeric value stored in UserRole
@@ -657,13 +661,13 @@ class DiffResultsWindow(QMainWindow):
         func_a = result.get('function_a', {})
         func_b = result.get('function_b', {})
         
-        if column == 1:  # Address A
+        if column == 3:  # Address A
             return func_a.get('address', 0)
-        elif column == 3:  # Address B
+        elif column == 5:  # Address B
             return func_b.get('address', 0)
-        elif column == 4:  # Similarity
+        elif column == 0:  # Similarity
             return result.get('similarity', 0)
-        elif column == 5:  # Confidence
+        elif column == 1:  # Confidence
             return result.get('confidence', 0)
         elif column == 7:  # Size A
             return func_a.get('size', 0)
@@ -685,9 +689,9 @@ class DiffResultsWindow(QMainWindow):
         func_a = result.get('function_a', {})
         func_b = result.get('function_b', {})
         
-        if column == 0:  # Function A name
+        if column == 2:  # Function A name
             return func_a.get('name', '').lower()
-        elif column == 2:  # Function B name
+        elif column == 4:  # Function B name
             return func_b.get('name', '').lower()
         elif column == 6:  # Match Type
             return result.get('match_type', '').lower()
@@ -699,8 +703,8 @@ class DiffResultsWindow(QMainWindow):
         if self.sort_column >= 0:
             # Get the current headers
             headers = [
-                "Function A", "Address A", "Function B", "Address B", 
-                "Similarity", "Confidence", "Match Type", "Size A", "Size B",
+                "Similarity", "Confidence", "Function A", "Address A", "Function B", "Address B", 
+                "Match Type", "Size A", "Size B",
                 "BB Count A", "BB Count B", "Instr Count A", "Instr Count B"
             ]
             
@@ -718,13 +722,13 @@ class DiffResultsWindow(QMainWindow):
     def on_cell_clicked(self, row, column):
         """Handle cell clicks, especially for address columns"""
         # Check if clicked column is an address column (Address A or Address B)
-        if column in [1, 3]:  # Address A or Address B
+        if column in [3, 5]:  # Address A or Address B
             try:
                 # Get the result for this row
                 if row < len(self.filtered_results):
                     result = self.filtered_results[row]
                     
-                    if column == 1:  # Address A
+                    if column == 3:  # Address A
                         address = result.get('function_a', {}).get('address', 0)
                         binary_view = self.binary_view_a
                         binary_name = "Binary A"

@@ -648,7 +648,7 @@ def convert_results_to_gui_format(results, bv1, bv2):
         try:
             # Convert function info to GUI format
             func_a_info = {
-                'name': match.func1.name,
+                'name': match.func1.symbol.short_name,
                 'address': match.func1.start,
                 'size': match.func1.total_bytes,
                 'basic_blocks': [{'address': bb.start, 'size': bb.length} for bb in match.func1.basic_blocks],
@@ -656,7 +656,7 @@ def convert_results_to_gui_format(results, bv1, bv2):
             }
             
             func_b_info = {
-                'name': match.func2.name,
+                'name': match.func2.symbol.short_name,
                 'address': match.func2.start,
                 'size': match.func2.total_bytes,
                 'basic_blocks': [{'address': bb.start, 'size': bb.length} for bb in match.func2.basic_blocks],
