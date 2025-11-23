@@ -2,6 +2,11 @@
 
 A high-performance binary diffing plugin for Binary Ninja that compares functions between two binaries using advanced structural and semantic analysis. Built with Rust for performance and Python for Binary Ninja integration.
 
+## Binary Diffing Example
+Example Marimo notebook analysis of CVE-2025-53766 GDI+ Remote Code Execution Vulnerability using the Rust Diff plugin for Binary Ninja https://github.com/meerkatone/patch_chewsday_cve_2025_53766
+
+![Screenshot](./images/rustdiff.png)
+
 ## Features
 
 - **Multiple export formats**: JSON, CSV, SQLite, HTML reports
