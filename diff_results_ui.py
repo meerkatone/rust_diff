@@ -510,34 +510,42 @@ class SideBySideDiffWidget(QWidget):
 
         html_a = []
         html_b = []
+        line_num_a = 1
+        line_num_b = 1
 
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == 'equal':
                 # Lines are the same
                 for i in range(i1, i2):
-                    html_a.append(f'<div style="background-color: #1e1e1e;">{self._escape_html(lines_a[i])}</div>')
+                    html_a.append(f'<div style="background-color: #1e1e1e;"><span style="color: #858585; user-select: none;">{line_num_a:4d}</span>&nbsp;&nbsp;{self._escape_html(lines_a[i])}</div>')
+                    line_num_a += 1
                 for j in range(j1, j2):
-                    html_b.append(f'<div style="background-color: #1e1e1e;">{self._escape_html(lines_b[j])}</div>')
+                    html_b.append(f'<div style="background-color: #1e1e1e;"><span style="color: #858585; user-select: none;">{line_num_b:4d}</span>&nbsp;&nbsp;{self._escape_html(lines_b[j])}</div>')
+                    line_num_b += 1
             elif tag == 'replace':
                 # Lines are different
                 for i in range(i1, i2):
-                    html_a.append(f'<div style="background-color: #4a1f1f; color: #ff6b6b;">{self._escape_html(lines_a[i])}</div>')
+                    html_a.append(f'<div style="background-color: #4a1f1f; color: #ff6b6b;"><span style="color: #ff9999; user-select: none;">{line_num_a:4d}</span>&nbsp;&nbsp;{self._escape_html(lines_a[i])}</div>')
+                    line_num_a += 1
                 for j in range(j1, j2):
-                    html_b.append(f'<div style="background-color: #1f4a1f; color: #6bff6b;">{self._escape_html(lines_b[j])}</div>')
+                    html_b.append(f'<div style="background-color: #1f4a1f; color: #6bff6b;"><span style="color: #99ff99; user-select: none;">{line_num_b:4d}</span>&nbsp;&nbsp;{self._escape_html(lines_b[j])}</div>')
+                    line_num_b += 1
             elif tag == 'delete':
                 # Line only in A
                 for i in range(i1, i2):
-                    html_a.append(f'<div style="background-color: #4a1f1f; color: #ff6b6b;">{self._escape_html(lines_a[i])}</div>')
+                    html_a.append(f'<div style="background-color: #4a1f1f; color: #ff6b6b;"><span style="color: #ff9999; user-select: none;">{line_num_a:4d}</span>&nbsp;&nbsp;{self._escape_html(lines_a[i])}</div>')
+                    line_num_a += 1
                 # Add empty lines to B for alignment
                 for _ in range(i1, i2):
-                    html_b.append(f'<div style="background-color: #2a2a2a; color: #666;">{"&nbsp;" * 50}</div>')
+                    html_b.append(f'<div style="background-color: #2a2a2a; color: #666;"><span style="color: #555; user-select: none;">&nbsp;&nbsp;&nbsp;&nbsp;</span>&nbsp;&nbsp;{"&nbsp;" * 50}</div>')
             elif tag == 'insert':
                 # Line only in B
                 for j in range(j1, j2):
-                    html_b.append(f'<div style="background-color: #1f4a1f; color: #6bff6b;">{self._escape_html(lines_b[j])}</div>')
+                    html_b.append(f'<div style="background-color: #1f4a1f; color: #6bff6b;"><span style="color: #99ff99; user-select: none;">{line_num_b:4d}</span>&nbsp;&nbsp;{self._escape_html(lines_b[j])}</div>')
+                    line_num_b += 1
                 # Add empty lines to A for alignment
                 for _ in range(j1, j2):
-                    html_a.append(f'<div style="background-color: #2a2a2a; color: #666;">{"&nbsp;" * 50}</div>')
+                    html_a.append(f'<div style="background-color: #2a2a2a; color: #666;"><span style="color: #555; user-select: none;">&nbsp;&nbsp;&nbsp;&nbsp;</span>&nbsp;&nbsp;{"&nbsp;" * 50}</div>')
 
         self.text_a.setHtml('<pre style="font-family: Courier; font-size: 18pt; margin: 0; padding: 0;">' + ''.join(html_a) + '</pre>')
         self.text_b.setHtml('<pre style="font-family: Courier; font-size: 18pt; margin: 0; padding: 0;">' + ''.join(html_b) + '</pre>')
