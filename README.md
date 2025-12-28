@@ -8,7 +8,6 @@ Example Marimo notebook analysis of CVE-2025-53766 GDI+ Remote Code Execution Vu
 ![Screenshot](./images/rustdiff.png)
 
 ## Features
-
 - **Side by Side Diff View
 - **Multiple export formats**: JSON, CSV, SQLite, HTML reports
 - **Optional Qt GUI**: Interactive results table with sorting and filtering
