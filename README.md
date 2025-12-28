@@ -70,3 +70,17 @@ Example Marimo notebook analysis of CVE-2025-53766 GDI+ Remote Code Execution Vu
 2. Go to Tools → Binary Diffing (Rust)
 3. Select a target BNDB file to compare against
 4. The plugin will analyze both binaries and display results
+
+## Side by Side Diff View
+
+The plugin includes a side by side diff view for detailed function comparison:
+
+- **Interactive comparison**: View decompiled code from both binaries side by side
+- **Synchronized scrolling**: Navigate through both versions simultaneously
+- **Similarity scoring**: See detailed match percentages and analysis metrics
+- **Context preservation**: Understand changes in the context of surrounding code
+
+To use the side by side view:
+1. Run the binary diff analysis as described above
+2. In the results table, double-click any function pair or select a row and click "View Side by Side"
+3. The diff view will open showing both versions of the function with highlighting for differences
