@@ -711,6 +711,7 @@ class DiffResultsWindow(QMainWindow):
         self.sort_order = Qt.AscendingOrder
         self.binary_view_a = binary_view_a  # Binary Ninja view for binary A
         self.binary_view_b = binary_view_b  # Binary Ninja view for binary B
+        self._initial_column_widths_set = False  # Track if column widths have been set
         self.setup_ui()
         self.load_results()
 
@@ -822,8 +823,12 @@ class DiffResultsWindow(QMainWindow):
                 border: 1px solid #555555;
                 font-weight: bold;
                 min-height: 36px;
+                text-align: center;
             }
         """)
+
+        # Center-align header text
+        self.table_view.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
 
         # Set minimum row height to prevent content from being cut off
         self.table_view.verticalHeader().setDefaultSectionSize(40)
@@ -1095,12 +1100,38 @@ class DiffResultsWindow(QMainWindow):
                     else:
                         item.setForeground(QColor(255, 255, 255))  # White text for all columns
 
-        # Resize columns to content
-        self.table_view.resizeColumnsToContents()
+        # Only resize columns on initial load to prevent width changes during sorting
+        if not self._initial_column_widths_set:
+            # Set explicit column widths that accommodate header text + sort indicator
+            # Headers: "Similarity", "Confidence", "Function A", "Address A", "Function B", "Address B",
+            #          "Match Type", "Size A", "Size B", "BB Count A", "BB Count B", "Instr Count A", "Instr Count B"
+            column_widths = [
+                200,  # Similarity
+                200,  # Confidence
+                240,  # Function A
+                190,  # Address A
+                240,  # Function B
+                190,  # Address B
+                190,  # Match Type
+                110,  # Size A
+                110,  # Size B
+                190,  # BB Count A
+                190,  # BB Count B
+                190,  # Instr Count A
+                190,  # Instr Count B
+            ]
 
-        # Set specific width for Function A and Function B (approx 30 chars)
-        self.table_view.setColumnWidth(2, 250)  # Function A
-        self.table_view.setColumnWidth(4, 250)  # Function B
+            for col, width in enumerate(column_widths):
+                self.table_view.setColumnWidth(col, width)
+
+            # Set header resize mode to Interactive so users can resize but sorting won't change widths
+            header = self.table_view.horizontalHeader()
+            for col in range(self.table_view.columnCount()):
+                header.setSectionResizeMode(col, QHeaderView.Interactive)
+            # Keep last section stretching
+            header.setStretchLastSection(True)
+
+            self._initial_column_widths_set = True
 
         # Ensure proper row height for all rows
         for row in range(self.table_view.rowCount()):
@@ -1275,25 +1306,14 @@ class DiffResultsWindow(QMainWindow):
             return ''
 
     def update_sort_indicator(self):
-        """Update the header to show sort direction indicator"""
+        """Update the header to show sort direction indicator using Qt's built-in indicator"""
+        header = self.table_view.horizontalHeader()
         if self.sort_column >= 0:
-            # Get the current headers
-            headers = [
-                "Similarity", "Confidence", "Function A", "Address A", "Function B", "Address B",
-                "Match Type", "Size A", "Size B",
-                "BB Count A", "BB Count B", "Instr Count A", "Instr Count B"
-            ]
-
-            # Add sort indicator to the current sort column
-            for i, header in enumerate(headers):
-                if i == self.sort_column:
-                    if self.sort_order == Qt.AscendingOrder:
-                        headers[i] = f"{header} ↑"
-                    else:
-                        headers[i] = f"{header} ↓"
-
-            # Update the headers
-            self.table_view.setHorizontalHeaderLabels(headers)
+            # Use Qt's built-in sort indicator instead of modifying header text
+            header.setSortIndicator(self.sort_column, self.sort_order)
+            header.setSortIndicatorShown(True)
+        else:
+            header.setSortIndicatorShown(False)
 
     def on_cell_clicked(self, row, column):
         """Handle cell clicks - load function pair in diff view or navigate to address"""
