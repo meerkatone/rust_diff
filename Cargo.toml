@@ -17,12 +17,9 @@ env_logger = "0.10"
 rayon = "1.7"
 rustc-hash = "1.1"
 petgraph = "0.6"
-itertools = "0.11"
 anyhow = "1.0"
-thiserror = "1.0"
 sha2 = "0.10"
 hex = "0.4"
-parking_lot = "0.12"
 
 [build-dependencies]
 cc = "1.0"
