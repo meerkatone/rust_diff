@@ -1025,7 +1025,7 @@ class DiffResultsWindow(QMainWindow):
 
             # Column 3: Address A (numeric, clickable)
             addr_a_item = QTableWidgetItem(f"0x{func_a.get('address', 0):x}")
-            addr_a_item.setData(Qt.UserRole, func_a.get('address', 0))
+            addr_a_item.setData(Qt.UserRole, str(func_a.get('address', 0)))
             # Make address clickable by changing font to underlined
             font = addr_a_item.font()
             font.setUnderline(True)
@@ -1039,7 +1039,7 @@ class DiffResultsWindow(QMainWindow):
 
             # Column 5: Address B (numeric, clickable)
             addr_b_item = QTableWidgetItem(f"0x{func_b.get('address', 0):x}")
-            addr_b_item.setData(Qt.UserRole, func_b.get('address', 0))
+            addr_b_item.setData(Qt.UserRole, str(func_b.get('address', 0)))
             # Make address clickable by changing font to underlined
             font = addr_b_item.font()
             font.setUnderline(True)
