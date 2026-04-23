@@ -1686,7 +1686,7 @@ class DiffResultsWindow(QMainWindow):
 
     def generate_html_report(self):
         """Generate HTML report of results"""
-        html = f"""
+        report = f"""
 <!DOCTYPE html>
 <html>
 <head>
@@ -1733,7 +1733,7 @@ class DiffResultsWindow(QMainWindow):
 </body>
 </html>
         """
-        return html
+        return report
 
     def generate_html_table_rows(self):
         """Generate HTML table rows for results"""
