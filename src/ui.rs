@@ -83,7 +83,12 @@ fn generate_report_with_colors(diff_result: &DiffResult, c: &ReportColors) -> St
     report.push_str(&format!("{}{}{}\n", c.separator, "-".repeat(60), c.reset));
 
     let mut sorted_matches = diff_result.matched_functions.clone();
-    sorted_matches.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_matches.sort_by(|a, b| {
+        b.confidence
+            .total_cmp(&a.confidence)
+            .then_with(|| a.function_a.address.cmp(&b.function_a.address))
+            .then_with(|| a.function_b.address.cmp(&b.function_b.address))
+    });
 
     for (i, m) in sorted_matches.iter().enumerate() {
         let cc = if m.confidence > 0.8 { c.confidence_high }

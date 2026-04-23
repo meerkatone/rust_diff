@@ -2,9 +2,39 @@ use crate::types::{FunctionInfo, FunctionMatch, MatchType, MatchDetails};
 use crate::algorithms::DiffAlgorithms;
 use crate::similarity::SimilarityAnalyzer;
 use anyhow::Result;
-use std::collections::HashMap;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use rayon::prelude::*;
+
+/// Deterministic tie-breaker: higher confidence wins; then higher similarity;
+/// then lower index_b (stable for identical scores).
+#[inline]
+fn better_candidate(c: f64, s: f64, idx: usize, bc: f64, bs: f64, bi: usize) -> bool {
+    match c.total_cmp(&bc) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => match s.total_cmp(&bs) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => idx < bi,
+        },
+    }
+}
+
+/// Returns true if `name` looks like an auto-generated placeholder
+/// (sub_xxxx, FUN_xxxx, loc_xxxx, fcn.xxxx, unnamed, j_sub_...).
+/// Matching by such names would collide across unrelated stripped functions.
+fn is_auto_generated_name(name: &str) -> bool {
+    let n = name.trim_start_matches("j_");
+    n.starts_with("sub_")
+        || n.starts_with("SUB_")
+        || n.starts_with("FUN_")
+        || n.starts_with("fun_")
+        || n.starts_with("loc_")
+        || n.starts_with("fcn.")
+        || n.starts_with("func_")
+        || n == "unnamed"
+        || n.is_empty()
+}
 
 pub struct MatchingEngine {
     confidence_threshold: f64,
@@ -33,8 +63,8 @@ impl MatchingEngine {
         functions_b: &[FunctionInfo],
     ) -> Result<Vec<FunctionMatch>> {
         let mut matches = Vec::new();
-        let mut used_a = std::collections::HashSet::new();
-        let mut used_b = std::collections::HashSet::new();
+        let mut used_a = FxHashSet::default();
+        let mut used_b = FxHashSet::default();
 
         // 1. Exact hash matching (highest confidence)
         self.exact_hash_matching(functions_a, functions_b, &mut matches, &mut used_a, &mut used_b)?;
@@ -63,8 +93,8 @@ impl MatchingEngine {
         functions_a: &[FunctionInfo],
         functions_b: &[FunctionInfo],
         matches: &mut Vec<FunctionMatch>,
-        used_a: &mut std::collections::HashSet<usize>,
-        used_b: &mut std::collections::HashSet<usize>,
+        used_a: &mut FxHashSet<usize>,
+        used_b: &mut FxHashSet<usize>,
     ) -> Result<()> {
         let mut hash_map_b: FxHashMap<String, Vec<usize>> = FxHashMap::default();
 
@@ -80,25 +110,29 @@ impl MatchingEngine {
             let combined_hash = format!("{}_{}", func_a.cfg_hash, func_a.call_graph_hash);
 
             if let Some(candidates) = hash_map_b.get(&combined_hash) {
+                // Take the lowest unused index deterministically for exact-hash ties.
+                let mut chosen: Option<usize> = None;
                 for &idx in candidates {
-                    if !used_b.contains(&idx) {
-                        let func_b = &functions_b[idx];
-                        let (similarity, details) = DiffAlgorithms::compute_match_details(func_a, func_b);
-                        let confidence = DiffAlgorithms::calculate_confidence(func_a, func_b, similarity);
-
-                        matches.push(FunctionMatch {
-                            function_a: func_a.clone(),
-                            function_b: func_b.clone(),
-                            similarity,
-                            confidence,
-                            match_type: MatchType::Exact,
-                            details,
-                        });
-
-                        used_a.insert(idx_a);
-                        used_b.insert(idx);
-                        break;
+                    if !used_b.contains(&idx) && chosen.map_or(true, |c| idx < c) {
+                        chosen = Some(idx);
                     }
+                }
+                if let Some(idx) = chosen {
+                    let func_b = &functions_b[idx];
+                    let (similarity, details) = DiffAlgorithms::compute_match_details(func_a, func_b);
+                    let confidence = DiffAlgorithms::calculate_confidence(func_a, func_b, similarity);
+
+                    matches.push(FunctionMatch {
+                        function_a: func_a.clone(),
+                        function_b: func_b.clone(),
+                        similarity,
+                        confidence,
+                        match_type: MatchType::Exact,
+                        details,
+                    });
+
+                    used_a.insert(idx_a);
+                    used_b.insert(idx);
                 }
             }
         }
@@ -112,22 +146,24 @@ impl MatchingEngine {
         functions_a: &[FunctionInfo],
         functions_b: &[FunctionInfo],
         matches: &mut Vec<FunctionMatch>,
-        used_a: &mut std::collections::HashSet<usize>,
-        used_b: &mut std::collections::HashSet<usize>,
+        used_a: &mut FxHashSet<usize>,
+        used_b: &mut FxHashSet<usize>,
     ) -> Result<()> {
-        let mut name_map_b: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut name_map_b: FxHashMap<String, Vec<usize>> = FxHashMap::default();
 
         for (i, func_b) in functions_b.iter().enumerate() {
-            if !used_b.contains(&i) {
+            if !used_b.contains(&i) && !is_auto_generated_name(&func_b.name) {
                 name_map_b.entry(func_b.name.clone()).or_default().push(i);
             }
         }
 
         for (idx_a, func_a) in functions_a.iter().enumerate() {
-            if used_a.contains(&idx_a) {
+            if used_a.contains(&idx_a) || is_auto_generated_name(&func_a.name) {
                 continue;
             }
             if let Some(candidates) = name_map_b.get(&func_a.name) {
+                // Pick the best candidate deterministically instead of first-match.
+                let mut best: Option<(usize, f64, f64, MatchDetails)> = None;
                 for &idx in candidates {
                     if !used_b.contains(&idx) {
                         let func_b = &functions_b[idx];
@@ -135,20 +171,25 @@ impl MatchingEngine {
                         let confidence = DiffAlgorithms::calculate_confidence(func_a, func_b, similarity);
 
                         if confidence >= self.confidence_threshold && similarity >= self.similarity_threshold {
-                            matches.push(FunctionMatch {
-                                function_a: func_a.clone(),
-                                function_b: func_b.clone(),
-                                similarity,
-                                confidence,
-                                match_type: MatchType::Structural,
-                                details,
-                            });
-
-                            used_a.insert(idx_a);
-                            used_b.insert(idx);
-                            break;
+                            if best.as_ref().map_or(true, |(bi, bs, bc, _)| {
+                                better_candidate(confidence, similarity, idx, *bc, *bs, *bi)
+                            }) {
+                                best = Some((idx, similarity, confidence, details));
+                            }
                         }
                     }
+                }
+                if let Some((idx, similarity, confidence, details)) = best {
+                    matches.push(FunctionMatch {
+                        function_a: func_a.clone(),
+                        function_b: functions_b[idx].clone(),
+                        similarity,
+                        confidence,
+                        match_type: MatchType::Structural,
+                        details,
+                    });
+                    used_a.insert(idx_a);
+                    used_b.insert(idx);
                 }
             }
         }
@@ -162,10 +203,10 @@ impl MatchingEngine {
         functions_a: &[FunctionInfo],
         functions_b: &[FunctionInfo],
         matches: &mut Vec<FunctionMatch>,
-        used_a: &mut std::collections::HashSet<usize>,
-        used_b: &mut std::collections::HashSet<usize>,
+        used_a: &mut FxHashSet<usize>,
+        used_b: &mut FxHashSet<usize>,
     ) -> Result<()> {
-        let mut md_map_b: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut md_map_b: FxHashMap<String, Vec<usize>> = FxHashMap::default();
 
         for (i, func_b) in functions_b.iter().enumerate() {
             if !used_b.contains(&i) {
@@ -190,7 +231,9 @@ impl MatchingEngine {
                         let confidence = DiffAlgorithms::calculate_confidence(func_a, func_b, similarity);
 
                         if confidence >= self.confidence_threshold && similarity >= self.similarity_threshold {
-                            if best.as_ref().map_or(true, |(_, _, bc, _)| confidence > *bc) {
+                            if best.as_ref().map_or(true, |(bi, bs, bc, _)| {
+                                better_candidate(confidence, similarity, idx, *bc, *bs, *bi)
+                            }) {
                                 best = Some((idx, similarity, confidence, details));
                             }
                         }
@@ -220,10 +263,10 @@ impl MatchingEngine {
         functions_a: &[FunctionInfo],
         functions_b: &[FunctionInfo],
         matches: &mut Vec<FunctionMatch>,
-        used_a: &mut std::collections::HashSet<usize>,
-        used_b: &mut std::collections::HashSet<usize>,
+        used_a: &mut FxHashSet<usize>,
+        used_b: &mut FxHashSet<usize>,
     ) -> Result<()> {
-        let mut primes_map_b: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut primes_map_b: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
 
         for (i, func_b) in functions_b.iter().enumerate() {
             if !used_b.contains(&i) {
@@ -247,7 +290,9 @@ impl MatchingEngine {
                         let confidence = DiffAlgorithms::calculate_confidence(func_a, func_b, similarity);
 
                         if confidence >= self.confidence_threshold && similarity >= self.similarity_threshold {
-                            if best.as_ref().map_or(true, |(_, _, bc, _)| confidence > *bc) {
+                            if best.as_ref().map_or(true, |(bi, bs, bc, _)| {
+                                better_candidate(confidence, similarity, idx, *bc, *bs, *bi)
+                            }) {
                                 best = Some((idx, similarity, confidence, details));
                             }
                         }
@@ -271,32 +316,50 @@ impl MatchingEngine {
         Ok(())
     }
 
-    /// Structural matching based on CFG isomorphism
+    /// Structural matching based on CFG isomorphism.
+    /// Pre-bucketed by basic-block count so we only run the isomorphism
+    /// check on plausibly-matching pairs (O(n²) over bucket size, not total).
     fn structural_matching(
         &self,
         functions_a: &[FunctionInfo],
         functions_b: &[FunctionInfo],
         matches: &mut Vec<FunctionMatch>,
-        used_a: &mut std::collections::HashSet<usize>,
-        used_b: &mut std::collections::HashSet<usize>,
+        used_a: &mut FxHashSet<usize>,
+        used_b: &mut FxHashSet<usize>,
     ) -> Result<()> {
+        // Bucket unmatched functions_b by basic-block count (required for isomorphism).
+        let mut bb_buckets: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+        for (i, func_b) in functions_b.iter().enumerate() {
+            if !used_b.contains(&i) {
+                bb_buckets.entry(func_b.basic_blocks.len()).or_default().push(i);
+            }
+        }
+
         for (idx_a, func_a) in functions_a.iter().enumerate() {
             if used_a.contains(&idx_a) {
                 continue;
             }
             let mut best_match: Option<(usize, f64, f64, MatchDetails)> = None;
 
-            for (i, func_b) in functions_b.iter().enumerate() {
+            let bucket = match bb_buckets.get(&func_a.basic_blocks.len()) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            for &i in bucket {
                 if used_b.contains(&i) {
                     continue;
                 }
 
-                if DiffAlgorithms::is_isomorphic_subgraph(func_a, func_b) {
+                if DiffAlgorithms::is_isomorphic_subgraph(func_a, &functions_b[i]) {
+                    let func_b = &functions_b[i];
                     let (similarity, details) = DiffAlgorithms::compute_match_details(func_a, func_b);
                     let confidence = DiffAlgorithms::calculate_confidence(func_a, func_b, similarity);
 
                     if confidence >= self.confidence_threshold && similarity >= self.similarity_threshold {
-                        if best_match.as_ref().map_or(true, |(_, _, bc, _)| confidence > *bc) {
+                        if best_match.as_ref().map_or(true, |(bi, bs, bc, _)| {
+                            better_candidate(confidence, similarity, i, *bc, *bs, *bi)
+                        }) {
                             best_match = Some((i, similarity, confidence, details));
                         }
                     }
@@ -326,10 +389,10 @@ impl MatchingEngine {
         functions_a: &[FunctionInfo],
         functions_b: &[FunctionInfo],
         matches: &mut Vec<FunctionMatch>,
-        used_a: &mut std::collections::HashSet<usize>,
-        used_b: &mut std::collections::HashSet<usize>,
+        used_a: &mut FxHashSet<usize>,
+        used_b: &mut FxHashSet<usize>,
     ) -> Result<()> {
-        let candidates: Vec<_> = functions_a
+        let mut candidates: Vec<_> = functions_a
             .iter()
             .enumerate()
             .filter(|(idx_a, _)| !used_a.contains(idx_a))
@@ -344,13 +407,15 @@ impl MatchingEngine {
 
                     let (primary, details) = DiffAlgorithms::compute_match_details(func_a, func_b);
                     let comprehensive = SimilarityAnalyzer::comprehensive_similarity(func_a, func_b);
-                    let similarity = primary * 0.6 + comprehensive * 0.4;
+                    let similarity = (primary * 0.6 + comprehensive * 0.4).clamp(0.0, 1.0);
                     let confidence = DiffAlgorithms::calculate_confidence(func_a, func_b, similarity);
 
                     if confidence >= self.confidence_threshold
                         && similarity >= self.similarity_threshold
                     {
-                        if best_match.as_ref().map_or(true, |(_, _, bc, _)| confidence > *bc) {
+                        if best_match.as_ref().map_or(true, |(bi, bs, bc, _)| {
+                            better_candidate(confidence, similarity, i, *bc, *bs, *bi)
+                        }) {
                             best_match = Some((i, similarity, confidence, details));
                         }
                     }
@@ -362,7 +427,13 @@ impl MatchingEngine {
             })
             .collect();
 
-        // Resolve conflicts: multiple functions_a may have matched the same functions_b index
+        // Deterministic conflict resolution: prefer higher confidence, then
+        // higher similarity, then lowest idx_a for stable tie-breaking.
+        candidates.sort_by(|a, b| {
+            b.4.total_cmp(&a.4)
+                .then_with(|| b.3.total_cmp(&a.3))
+                .then_with(|| a.0.cmp(&b.0))
+        });
         for (idx_a, func_a, idx_b, similarity, confidence, details) in candidates {
             if !used_a.contains(&idx_a) && !used_b.contains(&idx_b) {
                 matches.push(FunctionMatch {

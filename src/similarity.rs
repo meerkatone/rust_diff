@@ -75,7 +75,7 @@ impl SimilarityAnalyzer {
     pub fn normalized_edit_distance(s1: &str, s2: &str) -> f64 {
         let max_len = s1.len().max(s2.len());
         if max_len == 0 {
-            return 0.0;
+            return 1.0;
         }
         
         let edit_dist = Self::edit_distance(s1, s2);

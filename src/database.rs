@@ -115,9 +115,10 @@ impl DatabaseManager {
         Ok(())
     }
 
-    /// Export results to SQLite database
-    pub fn export_to_sqlite(database: &DiffDatabase, output_path: &Path) -> Result<()> {
-        // For now, create a simple SQL script that can be imported
+    /// Export results as a `.sql` script (CREATE TABLE + INSERT statements)
+    /// that can be imported into SQLite via `sqlite3 target.db < script.sql`.
+    /// Does not open a SQLite database itself.
+    pub fn export_to_sql_script(database: &DiffDatabase, output_path: &Path) -> Result<()> {
         let mut sql_content = String::new();
         
         // Create table

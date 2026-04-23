@@ -1,6 +1,7 @@
 use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct InstructionInfo {
     pub address: u64,
     pub mnemonic: String,
@@ -9,7 +10,8 @@ pub struct InstructionInfo {
     pub length: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct BasicBlockInfo {
     pub address: u64,
     pub size: u64,
@@ -19,7 +21,8 @@ pub struct BasicBlockInfo {
     pub instruction_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct FunctionInfo {
     pub name: String,
     pub address: u64,
@@ -33,7 +36,8 @@ pub struct FunctionInfo {
     pub call_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct DiffResult {
     pub matched_functions: Vec<FunctionMatch>,
     pub unmatched_functions_a: Vec<FunctionInfo>,
@@ -44,7 +48,8 @@ pub struct DiffResult {
     pub binary_b_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct FunctionMatch {
     pub function_a: FunctionInfo,
     pub function_b: FunctionInfo,
@@ -54,15 +59,17 @@ pub struct FunctionMatch {
     pub details: MatchDetails,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MatchType {
     Exact,
     Structural,
+    #[default]
     Heuristic,
     Manual,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct MatchDetails {
     pub cfg_similarity: f64,
     pub bb_similarity: f64,

@@ -6,23 +6,31 @@ use sha2::{Sha256, Digest};
 
 pub struct DiffAlgorithms;
 
+/// Clamp a score to [0.0, 1.0] and replace NaN with 0.0.
+#[inline]
+fn sanitize_score(x: f64) -> f64 {
+    if x.is_nan() { 0.0 } else { x.clamp(0.0, 1.0) }
+}
+
 impl DiffAlgorithms {
     /// Calculate similarity between two functions using multiple metrics
     /// and return both the weighted score and detailed per-metric breakdown.
     pub fn compute_match_details(func_a: &FunctionInfo, func_b: &FunctionInfo) -> (f64, MatchDetails) {
-        let cfg_similarity = Self::calculate_cfg_similarity(func_a, func_b);
-        let bb_similarity = Self::calculate_basic_block_similarity(func_a, func_b);
-        let instruction_similarity = Self::calculate_instruction_similarity(func_a, func_b);
-        let edge_similarity = Self::calculate_edge_similarity(func_a, func_b);
-        let name_similarity = SimilarityAnalyzer::normalized_edit_distance(&func_a.name, &func_b.name);
-        let call_similarity = SimilarityAnalyzer::function_call_similarity(func_a, func_b);
+        let cfg_similarity = sanitize_score(Self::calculate_cfg_similarity(func_a, func_b));
+        let bb_similarity = sanitize_score(Self::calculate_basic_block_similarity(func_a, func_b));
+        let instruction_similarity = sanitize_score(Self::calculate_instruction_similarity(func_a, func_b));
+        let edge_similarity = sanitize_score(Self::calculate_edge_similarity(func_a, func_b));
+        let name_similarity = sanitize_score(SimilarityAnalyzer::normalized_edit_distance(&func_a.name, &func_b.name));
+        let call_similarity = sanitize_score(SimilarityAnalyzer::function_call_similarity(func_a, func_b));
 
-        let weighted_similarity = cfg_similarity * 0.30
-            + call_similarity * 0.20
-            + bb_similarity * 0.15
-            + instruction_similarity * 0.15
-            + name_similarity * 0.10
-            + edge_similarity * 0.10;
+        let weighted_similarity = sanitize_score(
+            cfg_similarity * 0.30
+                + call_similarity * 0.20
+                + bb_similarity * 0.15
+                + instruction_similarity * 0.15
+                + name_similarity * 0.10
+                + edge_similarity * 0.10,
+        );
 
         let details = MatchDetails {
             cfg_similarity,
@@ -224,7 +232,7 @@ impl DiffAlgorithms {
             }
         }
 
-        confidence.min(1.0)
+        sanitize_score(confidence)
     }
 
     /// Perform isomorphic subgraph matching (edge-degree distribution check)

@@ -4,6 +4,7 @@ Qt GUI for displaying binary diff results with sorting, export, and side-by-side
 
 import csv
 import difflib
+import html
 import json
 import os
 import sqlite3
@@ -1434,6 +1435,18 @@ class DiffResultsWindow(QMainWindow):
         if not filename:
             return
 
+        def _csv_safe(v):
+            s = str(v) if v is not None else ''
+            if s and s[0] in ('=', '+', '-', '@', '\t', '\r'):
+                return "'" + s
+            return s
+
+        def _fmt_addr(v):
+            try:
+                return f"0x{int(v):016x}"
+            except (TypeError, ValueError):
+                return str(v)
+
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
@@ -1451,13 +1464,13 @@ class DiffResultsWindow(QMainWindow):
                     func_b = result.get('function_b', {})
 
                     writer.writerow([
-                        func_a.get('name', ''),
-                        f"0x{func_a.get('address', 0):x}",
-                        func_b.get('name', ''),
-                        f"0x{func_b.get('address', 0):x}",
+                        _csv_safe(func_a.get('name', '')),
+                        _fmt_addr(func_a.get('address', 0)),
+                        _csv_safe(func_b.get('name', '')),
+                        _fmt_addr(func_b.get('address', 0)),
                         f"{result.get('similarity', 0):.4f}",
                         f"{result.get('confidence', 0):.4f}",
-                        result.get('match_type', ''),
+                        _csv_safe(result.get('match_type', '')),
                         func_a.get('size', 0),
                         func_b.get('size', 0),
                         len(func_a.get('basic_blocks', [])),
@@ -1468,7 +1481,7 @@ class DiffResultsWindow(QMainWindow):
 
             QMessageBox.information(self, "Export Complete", f"Results exported to {filename}")
 
-        except Exception as e:
+        except (OSError, ValueError, TypeError) as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export CSV: {str(e)}")
 
     def export_to_sqlite(self):
@@ -1540,7 +1553,7 @@ class DiffResultsWindow(QMainWindow):
 
             QMessageBox.information(self, "Export Complete", f"Results exported to {filename}")
 
-        except Exception as e:
+        except (OSError, sqlite3.Error, ValueError, TypeError) as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export SQLite: {str(e)}")
 
     def export_to_json(self):
@@ -1565,7 +1578,7 @@ class DiffResultsWindow(QMainWindow):
 
             QMessageBox.information(self, "Export Complete", f"Results exported to {filename}")
 
-        except Exception as e:
+        except (OSError, ValueError, TypeError) as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export JSON: {str(e)}")
 
     def export_to_html(self):
@@ -1581,7 +1594,7 @@ class DiffResultsWindow(QMainWindow):
 
             QMessageBox.information(self, "Export Complete", f"Results exported to {filename}")
 
-        except Exception as e:
+        except (OSError, ValueError, TypeError) as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export HTML: {str(e)}")
 
     def export_current_diff_to_json(self):
@@ -1668,7 +1681,7 @@ class DiffResultsWindow(QMainWindow):
 
             QMessageBox.information(self, "Export Complete", f"Current diff view exported to {filename}")
 
-        except Exception as e:
+        except (OSError, ValueError, TypeError) as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export current diff: {str(e)}")
 
     def generate_html_report(self):
@@ -1699,8 +1712,8 @@ class DiffResultsWindow(QMainWindow):
 
     <div class="summary">
         <h2>Summary</h2>
-        <p><strong>Binary A:</strong> {self.results_data.get('binary_a_name', 'N/A')}</p>
-        <p><strong>Binary B:</strong> {self.results_data.get('binary_b_name', 'N/A')}</p>
+        <p><strong>Binary A:</strong> {html.escape(str(self.results_data.get('binary_a_name', 'N/A')))}</p>
+        <p><strong>Binary B:</strong> {html.escape(str(self.results_data.get('binary_b_name', 'N/A')))}</p>
         <p><strong>Total Matches:</strong> {len(self.filtered_results)}</p>
         <p><strong>Analysis Time:</strong> {self.results_data.get('analysis_time', 0):.2f} seconds</p>
     </div>
@@ -1724,7 +1737,13 @@ class DiffResultsWindow(QMainWindow):
 
     def generate_html_table_rows(self):
         """Generate HTML table rows for results"""
-        rows = ""
+        def _fmt_addr(v):
+            try:
+                return f"0x{int(v):016x}"
+            except (TypeError, ValueError):
+                return html.escape(str(v))
+
+        parts = []
         for result in self.filtered_results:
             func_a = result.get('function_a', {})
             func_b = result.get('function_b', {})
@@ -1737,18 +1756,18 @@ class DiffResultsWindow(QMainWindow):
             else:
                 css_class = 'low-confidence'
 
-            rows += f'''
-        <tr class="{css_class}">
-            <td>{func_a.get('name', '')}</td>
-            <td>0x{func_a.get('address', 0):x}</td>
-            <td>{func_b.get('name', '')}</td>
-            <td>0x{func_b.get('address', 0):x}</td>
-            <td>{result.get('similarity', 0):.4f}</td>
-            <td>{result.get('confidence', 0):.4f}</td>
-            <td>{result.get('match_type', '')}</td>
-        </tr>
-            '''
-        return rows
+            parts.append(
+                f'<tr class="{css_class}">'
+                f'<td>{html.escape(str(func_a.get("name", "")))}</td>'
+                f'<td>{_fmt_addr(func_a.get("address", 0))}</td>'
+                f'<td>{html.escape(str(func_b.get("name", "")))}</td>'
+                f'<td>{_fmt_addr(func_b.get("address", 0))}</td>'
+                f'<td>{result.get("similarity", 0):.4f}</td>'
+                f'<td>{result.get("confidence", 0):.4f}</td>'
+                f'<td>{html.escape(str(result.get("match_type", "")))}</td>'
+                f'</tr>\n'
+            )
+        return ''.join(parts)
 
 
 def show_diff_results(results_data, binary_view_a=None, binary_view_b=None):
