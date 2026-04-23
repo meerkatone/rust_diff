@@ -124,9 +124,9 @@ impl DatabaseManager {
         sql_content.push_str("CREATE TABLE IF NOT EXISTS function_matches (\n");
         sql_content.push_str("    id INTEGER PRIMARY KEY AUTOINCREMENT,\n");
         sql_content.push_str("    function_a_name TEXT,\n");
-        sql_content.push_str("    function_a_address INTEGER,\n");
+        sql_content.push_str("    function_a_address TEXT,\n");
         sql_content.push_str("    function_b_name TEXT,\n");
-        sql_content.push_str("    function_b_address INTEGER,\n");
+        sql_content.push_str("    function_b_address TEXT,\n");
         sql_content.push_str("    similarity REAL,\n");
         sql_content.push_str("    confidence REAL,\n");
         sql_content.push_str("    match_type TEXT,\n");
@@ -142,7 +142,7 @@ impl DatabaseManager {
         // Insert data
         for match_result in &database.matches {
             sql_content.push_str(&format!(
-                "INSERT INTO function_matches (function_a_name, function_a_address, function_b_name, function_b_address, similarity, confidence, match_type, size_a, size_b, bb_count_a, bb_count_b, instr_count_a, instr_count_b) VALUES ('{}', {}, '{}', {}, {:.4}, {:.4}, '{:?}', {}, {}, {}, {}, {}, {});\n",
+                "INSERT INTO function_matches (function_a_name, function_a_address, function_b_name, function_b_address, similarity, confidence, match_type, size_a, size_b, bb_count_a, bb_count_b, instr_count_a, instr_count_b) VALUES ('{}', '0x{:016x}', '{}', '0x{:016x}', {:.4}, {:.4}, '{:?}', {}, {}, {}, {}, {}, {});\n",
                 match_result.function_a.name.replace("'", "''"),
                 match_result.function_a.address,
                 match_result.function_b.name.replace("'", "''"),

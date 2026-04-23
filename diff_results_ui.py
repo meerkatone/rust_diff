@@ -1486,9 +1486,9 @@ class DiffResultsWindow(QMainWindow):
                 CREATE TABLE IF NOT EXISTS function_matches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     function_a_name TEXT,
-                    function_a_address INTEGER,
+                    function_a_address TEXT,
                     function_b_name TEXT,
-                    function_b_address INTEGER,
+                    function_b_address TEXT,
                     similarity REAL,
                     confidence REAL,
                     match_type TEXT,
@@ -1501,6 +1501,12 @@ class DiffResultsWindow(QMainWindow):
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            def _fmt_addr(v):
+                try:
+                    return f"0x{int(v):016x}"
+                except (TypeError, ValueError):
+                    return str(v)
 
             # Insert data
             for result in self.filtered_results:
@@ -1515,9 +1521,9 @@ class DiffResultsWindow(QMainWindow):
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     func_a.get('name', ''),
-                    func_a.get('address', 0),
+                    _fmt_addr(func_a.get('address', 0)),
                     func_b.get('name', ''),
-                    func_b.get('address', 0),
+                    _fmt_addr(func_b.get('address', 0)),
                     result.get('similarity', 0),
                     result.get('confidence', 0),
                     result.get('match_type', ''),
