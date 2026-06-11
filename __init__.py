@@ -1,18 +1,21 @@
 """
 Binary Diffing Plugin for Binary Ninja
-Based on the binary_diffing_plugin.py implementation
+
+Python is only the frontend here: it extracts per-function features from the
+BinaryViews and hands them as JSON to the Rust engine (librust_diff), which
+performs all matching (WL graph hashes, MD-Index, small-primes-product,
+call-graph propagation, fuzzy matching) and returns a JSON DiffResult.
 """
 import binaryninja as bn
 from binaryninja import BackgroundTaskThread, PluginCommand, BinaryView
-from binaryninja import log_info, log_error, show_message_box
+from binaryninja import log_info, log_error
 from binaryninja import get_open_filename_input
+import ctypes
 import hashlib
-import collections
 import json
 import os
+import platform
 import sys
-import threading
-import random
 
 # Add the plugin directory to sys.path for imports
 plugin_dir = os.path.dirname(os.path.abspath(__file__))
@@ -30,741 +33,500 @@ except ImportError as e:
     log_info("  or run: python install_pyside.py")
     HAS_GUI = False
 
-class FunctionMatch:
-    """Represents a match between two functions"""
-    def __init__(self, func1, func2, similarity, confidence, technique):
-        self.func1 = func1
-        self.func2 = func2 
-        self.similarity = similarity
-        self.confidence = confidence
-        self.technique = technique
+
+# ---------------------------------------------------------------------------
+# Rust engine bridge
+# ---------------------------------------------------------------------------
+
+_RUST_LIB = None
+
+
+def _rust_lib_path():
+    names = {
+        "Darwin": "librust_diff.dylib",
+        "Linux": "librust_diff.so",
+        "Windows": "rust_diff.dll",
+    }
+    name = names.get(platform.system(), "librust_diff.so")
+    return os.path.join(plugin_dir, "target", "release", name)
+
+
+def load_rust_engine():
+    """Load (once) the Rust diffing engine via ctypes. Returns None on failure."""
+    global _RUST_LIB
+    if _RUST_LIB is not None:
+        return _RUST_LIB
+
+    path = _rust_lib_path()
+    if not os.path.exists(path):
+        log_error(f"Rust diff engine not found at {path}")
+        log_error("Build it with: cargo build --release (in the plugin directory)")
+        return None
+
+    try:
+        lib = ctypes.CDLL(path)
+        lib.rust_diff_diff_json.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        # void* (not c_char_p) so we keep the original pointer to free it
+        lib.rust_diff_diff_json.restype = ctypes.c_void_p
+        lib.rust_diff_free_string.argtypes = [ctypes.c_void_p]
+        lib.rust_diff_free_string.restype = None
+        # Semantic IL diff (single request blob in, IlDiff JSON out).
+        lib.rust_diff_il_diff_json.argtypes = [ctypes.c_char_p]
+        lib.rust_diff_il_diff_json.restype = ctypes.c_void_p
+    except OSError as e:
+        log_error(f"Failed to load Rust diff engine: {e}")
+        return None
+
+    _RUST_LIB = lib
+    return lib
+
+
+def rust_diff(functions_a, functions_b):
+    """Run the Rust matcher on two extracted function lists. Returns the
+    DiffResult dict, or None on failure."""
+    lib = load_rust_engine()
+    if lib is None:
+        return None
+
+    json_a = json.dumps(functions_a).encode("utf-8")
+    json_b = json.dumps(functions_b).encode("utf-8")
+
+    ptr = lib.rust_diff_diff_json(json_a, json_b)
+    if not ptr:
+        log_error("Rust diff engine returned an error (see log for details)")
+        return None
+    try:
+        result_json = ctypes.cast(ptr, ctypes.c_char_p).value.decode("utf-8")
+    finally:
+        lib.rust_diff_free_string(ptr)
+
+    return json.loads(result_json)
+
+
+# ---------------------------------------------------------------------------
+# IL-aware (semantic) diff
+# ---------------------------------------------------------------------------
+
+# Map Binary Ninja IL level names to the function attribute that yields the IL.
+_IL_ACCESSORS = {
+    "LLIL": "llil",
+    "MLIL": "mlil",
+    "HLIL": "hlil",
+}
+
+
+def extract_il_function(func, level):
+    """Build an IL token stream (`il::IlFunction` JSON shape) for one function
+    at the given level ("LLIL"/"MLIL"/"HLIL"). Each rendered IL line becomes a
+    list of typed tokens (kind = Binary Ninja token type name) plus the
+    rendered text. Returns None if the IL is unavailable."""
+    accessor = _IL_ACCESSORS.get(level)
+    if accessor is None:
+        return None
+    try:
+        il = getattr(func, accessor, None)
+    except Exception:
+        il = None
+    if not il:
+        return None
+
+    lines = []
+    try:
+        for instr in il.instructions:
+            tokens = []
+            text_parts = []
+            for tok in getattr(instr, "tokens", []) or []:
+                # InstructionTextToken.type is an enum; its name is the kind.
+                kind = getattr(getattr(tok, "type", None), "name", "") or ""
+                text = tok.text
+                tokens.append({"kind": kind, "text": text})
+                text_parts.append(text)
+            lines.append({"tokens": tokens, "text": "".join(text_parts)})
+    except Exception as e:
+        log_error(f"Error extracting {level} for {func.name}: {e}")
+        return None
+
+    return {"level": level, "lines": lines}
+
+
+def il_diff(il_a, il_b, rename_map=None, addr_map=None):
+    """Run the Rust semantic IL diff. `il_a`/`il_b` are `extract_il_function`
+    results; `rename_map` maps callee-symbol-in-A -> callee-symbol-in-B and
+    `addr_map` maps callee-code-address-in-A -> -in-B for matched callees, so
+    renamed/relocated-but-matched calls read as cosmetic. Returns the IlDiff
+    dict, or None on failure."""
+    lib = load_rust_engine()
+    if lib is None or il_a is None or il_b is None:
+        return None
+
+    request = {"a": il_a, "b": il_b, "rename_map": rename_map or {}, "addr_map": addr_map or {}}
+    request_json = json.dumps(request).encode("utf-8")
+
+    ptr = lib.rust_diff_il_diff_json(request_json)
+    if not ptr:
+        log_error("Rust IL diff returned an error (see log for details)")
+        return None
+    try:
+        result_json = ctypes.cast(ptr, ctypes.c_char_p).value.decode("utf-8")
+    finally:
+        lib.rust_diff_free_string(ptr)
+
+    return json.loads(result_json)
+
+
+# ---------------------------------------------------------------------------
+# Feature extraction
+# ---------------------------------------------------------------------------
+
+def _extract_basic_block(bb):
+    """Extract instructions, edges and a mnemonic hash from one basic block."""
+    instructions = []
+    mnemonics = []
+    addr = bb.start
+    for tokens, length in bb:
+        mnemonic = tokens[0].text.strip() if tokens else ""
+        operands = [
+            t.text.strip()
+            for t in tokens[1:]
+            if t.text.strip() and t.text.strip() != ","
+        ]
+        instructions.append({
+            "address": addr,
+            "mnemonic": mnemonic,
+            "operands": operands,
+            "bytes": [],
+            "length": length,
+        })
+        mnemonics.append(mnemonic)
+        addr += length
+
+    # Deterministic across sessions, unlike Python's salted hash().
+    mnemonic_hash = hashlib.sha256(" ".join(mnemonics).encode("utf-8")).hexdigest()[:16]
+
+    return {
+        "address": bb.start,
+        "size": bb.length,
+        "instructions": instructions,
+        "edges": sorted({e.target.start for e in bb.outgoing_edges}),
+        "mnemonic_hash": mnemonic_hash,
+        "instruction_count": len(instructions),
+    }
+
+
+def _extract_function(func):
+    """Extract one function into the Rust FunctionInfo JSON shape."""
+    basic_blocks = []
+    for bb in func.basic_blocks:
+        try:
+            basic_blocks.append(_extract_basic_block(bb))
+        except Exception as e:
+            log_error(f"Error extracting block at 0x{bb.start:x} in {func.name}: {e}")
+
+    instructions = [i for b in basic_blocks for i in b["instructions"]]
+    edge_count = sum(len(b["edges"]) for b in basic_blocks)
+    complexity = max(1, edge_count - len(basic_blocks) + 2)
+
+    try:
+        callees = sorted({c.start for c in func.callees})
+    except Exception:
+        callees = []
+    try:
+        callers = sorted({c.start for c in func.callers})
+    except Exception:
+        callers = []
+
+    size = func.total_bytes
+    if not size:
+        size = max(1, func.highest_address - func.lowest_address)
+
+    return {
+        "name": func.name,
+        "address": func.start,
+        "size": size,
+        "basic_blocks": basic_blocks,
+        "instructions": instructions,
+        "cyclomatic_complexity": complexity,
+        # Structure hashes are computed in Rust (preprocess_functions) so
+        # they are deterministic and frontend-independent.
+        "call_graph_hash": "",
+        "cfg_hash": "",
+        "instruction_count": len(instructions),
+        "call_count": len(callees),
+        "callees": callees,
+        "callers": callers,
+    }
+
+
+# ---------------------------------------------------------------------------
+# On-demand IL refinement
+# ---------------------------------------------------------------------------
+# The bulk matcher sees only disassembly features. After it runs, we extract IL
+# for a *small* candidate set — weak existing matches and a few size-near
+# unmatched pairs — and use semantic IL similarity to confirm/re-rank and to
+# rescue matches the disassembly heuristics missed. Bounded so large binaries
+# stay responsive.
+
+# Match types that are already near ground truth and not worth re-checking.
+_STRONG_MATCH_TYPES = {"Exact", "Name", "MdIndex", "SmallPrimes"}
+_REFINE_CONF_BELOW = 0.85   # only re-check matches at/under this confidence
+_REFINE_MAX = 400           # cap weak matches to refine
+_RESCUE_MAX_A = 300         # cap unmatched-A functions to attempt rescuing
+_RESCUE_TOPK = 6            # size-nearest B candidates to score per A
+_RESCUE_IL_THRESHOLD = 0.6  # min IL similarity to accept a rescued match
+_REFINE_MIN_INSTRS = 5      # below this, IL carries too little signal
+_REFINE_IL_LEVEL = "MLIL"   # fast, more stable across builds than LLIL
+
+
+def _il_for(bv, address, cache):
+    """Extract (and cache) the IL token stream for one function address."""
+    if address in cache:
+        return cache[address]
+    func = bv.get_function_at(address)
+    il = extract_il_function(func, _REFINE_IL_LEVEL) if func else None
+    cache[address] = il
+    return il
+
+
+def refine_matches_with_il(bv_a, bv_b, result, progress=None):
+    """Confirm/re-rank weak matches and rescue missed ones using semantic IL
+    similarity. Mutates `result` in place; safe to skip on any failure."""
+    if load_rust_engine() is None:
+        return
+
+    cache_a, cache_b = {}, {}
+    matches = result.get("matched_functions", [])
+
+    # 1. Re-check weak matches: blend IL similarity into the score.
+    refined = 0
+    for m in matches:
+        if refined >= _REFINE_MAX:
+            break
+        if m.get("match_type") in _STRONG_MATCH_TYPES and m.get("confidence", 0) >= _REFINE_CONF_BELOW:
+            continue
+        fa, fb = m.get("function_a", {}), m.get("function_b", {})
+        if min(fa.get("instruction_count", 0), fb.get("instruction_count", 0)) < _REFINE_MIN_INSTRS:
+            continue
+        il_a = _il_for(bv_a, fa.get("address"), cache_a)
+        il_b = _il_for(bv_b, fb.get("address"), cache_b)
+        d = il_diff(il_a, il_b)
+        if d is None:
+            continue
+        il_sim = d.get("similarity", 0.0)
+        m["il_similarity"] = round(il_sim, 4)
+        # Blend so IL evidence can both raise and lower a weak score.
+        m["similarity"] = round(0.5 * m.get("similarity", 0.0) + 0.5 * il_sim, 4)
+        refined += 1
+
+    # 2. Rescue: score each unmatched-A against size-near unmatched-B.
+    unmatched_a = result.get("unmatched_functions_a", [])
+    unmatched_b = result.get("unmatched_functions_b", [])
+    b_pool = sorted(
+        (fb for fb in unmatched_b if fb.get("instruction_count", 0) >= _REFINE_MIN_INSTRS),
+        key=lambda f: f.get("instruction_count", 0),
+    )
+    b_counts = [f.get("instruction_count", 0) for f in b_pool]
+    used_b_addrs = set()
+    rescued = []
+
+    import bisect
+    for ai, fa in enumerate(unmatched_a[:_RESCUE_MAX_A]):
+        ca = fa.get("instruction_count", 0)
+        if ca < _REFINE_MIN_INSTRS or not b_pool:
+            continue
+        # Window of the K size-nearest B candidates around ca.
+        lo = bisect.bisect_left(b_counts, ca)
+        cand_idx = sorted(range(max(0, lo - _RESCUE_TOPK), min(len(b_pool), lo + _RESCUE_TOPK)),
+                          key=lambda j: abs(b_counts[j] - ca))[:_RESCUE_TOPK]
+        il_a = _il_for(bv_a, fa.get("address"), cache_a)
+        if il_a is None:
+            continue
+        best = None
+        for j in cand_idx:
+            fb = b_pool[j]
+            if fb.get("address") in used_b_addrs:
+                continue
+            il_b = _il_for(bv_b, fb.get("address"), cache_b)
+            d = il_diff(il_a, il_b)
+            if d is None:
+                continue
+            il_sim = d.get("similarity", 0.0)
+            if il_sim >= _RESCUE_IL_THRESHOLD and (best is None or il_sim > best[1]):
+                best = (fb, il_sim)
+        if best is not None:
+            fb, il_sim = best
+            used_b_addrs.add(fb.get("address"))
+            rescued.append((ai, fb, il_sim))
+
+    # Apply rescues: add matches, drop the paired functions from unmatched lists.
+    if rescued:
+        rescued_a_idx = {ai for ai, _, _ in rescued}
+        for ai, fb, il_sim in rescued:
+            fa = unmatched_a[ai]
+            matches.append({
+                "function_a": fa,
+                "function_b": fb,
+                "similarity": round(il_sim, 4),
+                "confidence": round(il_sim, 4),
+                "match_type": "IL",
+                "il_similarity": round(il_sim, 4),
+                "details": {},
+            })
+        result["unmatched_functions_a"] = [
+            f for i, f in enumerate(unmatched_a) if i not in rescued_a_idx]
+        result["unmatched_functions_b"] = [
+            f for f in unmatched_b if f.get("address") not in used_b_addrs]
+
+    # Re-derive the overall score: blended similarities and rescued matches
+    # changed the per-match values, so the cached aggregate is now stale.
+    if matches:
+        result["similarity_score"] = round(
+            sum(m.get("similarity", 0.0) for m in matches) / len(matches), 6)
+
+    if progress is not None:
+        progress(refined, len(rescued))
+
 
 class BinaryDiffTask(BackgroundTaskThread):
-    """Background task for performing binary diffing"""
-    
+    """Background task: extract features from both binaries and run the Rust engine."""
+
     def __init__(self, bv1: BinaryView, bv2: BinaryView):
         super().__init__("Binary Diffing", True)
         self.bv1 = bv1
         self.bv2 = bv2
-        self.similarities = {}
-        self.matched_funcs = {}
-        self.results = []
-        
+        self.result = None
+
+    def _extract_binary_features(self, bv):
+        functions = []
+        function_list = list(bv.functions)
+        total = len(function_list)
+        log_info(f"Extracting features from {total} functions in {bv.file.filename}")
+        for i, func in enumerate(function_list):
+            if self.cancelled:
+                return None
+            if i % 100 == 0:
+                self.progress = f"Extracting {bv.file.filename}: {i}/{total}"
+            try:
+                functions.append(_extract_function(func))
+            except Exception as e:
+                log_error(f"Error extracting function {func.name}: {e}")
+        return functions
+
     def run(self):
         try:
-            # Extract features from both binaries
             self.progress = "Extracting features from first binary..."
-            self.features1 = self._extract_binary_features(self.bv1)
-            
-            if self.cancelled:
+            features1 = self._extract_binary_features(self.bv1)
+            if features1 is None or self.cancelled:
                 return
-                
+
             self.progress = "Extracting features from second binary..."
-            self.features2 = self._extract_binary_features(self.bv2)
-            
-            if self.cancelled:
+            features2 = self._extract_binary_features(self.bv2)
+            if features2 is None or self.cancelled:
                 return
-                
-            # Match functions based on features
-            self.progress = "Matching functions..."
-            self._match_functions(self.features1, self.features2)
-            
-            if self.cancelled:
+
+            self.progress = f"Matching {len(features1)} x {len(features2)} functions (Rust engine)..."
+            result = rust_diff(features1, features2)
+            if result is None:
                 return
-                
-            # Convert to result objects
-            self.results = []
-            for addr1, (addr2, score) in self.matched_funcs.items():
+
+            result["binary_a_name"] = self.bv1.file.filename
+            result["binary_b_name"] = self.bv2.file.filename
+
+            # On-demand IL refinement pass (bounded; best-effort).
+            if not self.cancelled:
+                self.progress = "Refining matches with IL similarity..."
                 try:
-                    func1 = self.bv1.get_function_at(addr1)
-                    func2 = self.bv2.get_function_at(addr2)
-                    
-                    if func1 and func2:
-                        # Get technique for this match
-                        technique = self._get_match_technique(addr1, addr2)
-                        
-                        # Add small variation to confidence based on match quality
-                        confidence = score
-                        if technique == "Structural":
-                            confidence = min(1.0, score + 0.02)  # Boost structural matches
-                        elif technique == "Name":
-                            confidence = min(1.0, score + 0.03)  # Boost name matches
-                        
-                        match = FunctionMatch(
-                            func1=func1,
-                            func2=func2,
-                            similarity=score,
-                            confidence=confidence,
-                            technique=technique
-                        )
-                        self.results.append(match)
+                    def _report(refined, rescued):
+                        log_info(f"IL refinement: re-checked {refined} weak match(es), "
+                                 f"rescued {rescued} new match(es)")
+                    refine_matches_with_il(self.bv1, self.bv2, result, progress=_report)
                 except Exception as e:
-                    log_error(f"Error creating match result: {e}")
-            
-            log_info(f"Binary diff completed. Found {len(self.results)} matches.")
-            
+                    log_error(f"IL refinement pass failed (continuing): {e}")
+
+            self.result = result
+
+            log_info(
+                f"Binary diff completed in {result.get('analysis_time', 0):.2f}s: "
+                f"{len(result.get('matched_functions', []))} matches, "
+                f"{len(result.get('unmatched_functions_a', []))} unmatched in A, "
+                f"{len(result.get('unmatched_functions_b', []))} unmatched in B"
+            )
         except Exception as e:
             log_error(f"Error during binary diffing: {e}")
-            
-    def _extract_binary_features(self, bv):
-        """Extract features from all functions in the binary"""
-        all_features = {}
-        functions_list = list(bv.functions)
-        total_funcs = len(functions_list)
-        
-        log_info(f"Extracting features from {total_funcs} functions in {bv.file.filename}")
-        
-        for i, func in enumerate(functions_list):
-            if self.cancelled:
-                break
-                
-            self.progress = f"Processing function {i+1}/{total_funcs}: {func.name}"
-            
-            # Get basic function metrics
-            instruction_count = 0
-            basic_block_count = 0
-            function_size = 0
-            
-            try:
-                # Get function size
-                function_size = func.total_bytes
-                if function_size == 0:
-                    # Try alternative size calculation
-                    function_size = func.highest_address - func.lowest_address if func.highest_address > func.lowest_address else 1
-                    
-                # Get basic blocks
-                basic_blocks = list(func.basic_blocks)
-                basic_block_count = len(basic_blocks)
-                
-                if basic_block_count == 0:
-                    # Function has no basic blocks - might be external or data
-                    basic_block_count = 1
-                    instruction_count = 1
-                    if i < 5:
-                        log_info(f"Function {func.name} has no basic blocks - using defaults")
-                else:
-                    # Count instructions in basic blocks
-                    for bb in basic_blocks:
-                        try:
-                            if hasattr(bb, 'instruction_count') and bb.instruction_count > 0:
-                                instruction_count += bb.instruction_count
-                            else:
-                                # Count instructions manually
-                                bb_instructions = list(bb)
-                                instruction_count += len(bb_instructions)
-                        except Exception as e:
-                            if i < 5:
-                                log_error(f"Error counting instructions in basic block: {e}")
-                            instruction_count += 3  # Conservative estimate
-                            
-            except Exception as e:
-                log_error(f"Error processing function {func.name}: {e}")
-                function_size = 1
-                basic_block_count = 1
-                instruction_count = 1
-            
-            features = {
-                'size': function_size if function_size > 0 else 1,  # Avoid zero
-                'basic_block_count': basic_block_count if basic_block_count > 0 else 1,
-                'instruction_count': instruction_count if instruction_count > 0 else 1,
-                'name': func.name,
-                'address': func.start
-            }
-            
-            # Debug output for feature extraction
-            if i < 5:  # Only log first 5 functions to avoid spam
-                log_info(f"Function {func.name}: size={features['size']}, bb={features['basic_block_count']}, instr={features['instruction_count']}")
-            
-            # Add structural hash
-            try:
-                features['structural_hash'] = self._calculate_structural_hash(func)
-            except:
-                features['structural_hash'] = 0
-                
-            # Add instruction hash  
-            try:
-                features['instruction_hash'] = self._calculate_instruction_hash(func)
-            except:
-                features['instruction_hash'] = 0
-                
-            all_features[func.start] = features
-            
-        return all_features
-        
-    def _calculate_structural_hash(self, func) -> int:
-        """Calculate a hash based on function structure"""
-        try:
-            hash_data = []
-            hash_data.append(str(len(list(func.basic_blocks))))
-            
-            for bb in func.basic_blocks:
-                # Add edge information
-                hash_data.append(str(len(bb.outgoing_edges)))
-                # Add basic block size for more variation
-                hash_data.append(str(bb.length))
-                
-            # Add function size for more variation
-            hash_data.append(str(func.total_bytes))
-            
-            hash_str = ''.join(hash_data)
-            return hash(hash_str) & 0xFFFFFFFF
-        except:
-            return 0
-            
-    def _calculate_instruction_hash(self, func) -> int:
-        """Calculate a hash based on instruction patterns"""
-        try:
-            instructions = []
-            for bb in func.basic_blocks:
-                for instr in bb:
-                    try:
-                        # Add instruction mnemonic
-                        if hasattr(instr, 'operation'):
-                            instructions.append(str(instr.operation))
-                        elif hasattr(instr, 'mnemonic'):
-                            instructions.append(instr.mnemonic)
-                        # Add instruction length for more variation
-                        instructions.append(str(instr.length))
-                    except:
-                        pass
-                        
-            # Add function address for more variation (different addresses = different hashes)
-            instructions.append(str(func.start))
-            
-            instr_str = ''.join(instructions)
-            # Add a small random factor to create more hash variation
-            random.seed(func.start)  # Use address as seed for consistency
-            random_factor = random.randint(1, 1000)
-            instructions.append(str(random_factor))
-            
-            return hash(''.join(instructions)) & 0xFFFFFFFF
-        except:
-            return 0
-            
-    def _match_functions(self, features1, features2):
-        """Match functions between the two binaries"""
-        self.matched_funcs = {}
-        used_funcs2 = set()
-        
-        # Phase 1: Exact hash matches
-        for addr1, feat1 in features1.items():
-            if self.cancelled:
-                break
-                
-            best_match = None
-            best_score = 0
-            
-            for addr2, feat2 in features2.items():
-                if addr2 in used_funcs2:
-                    continue
-                    
-                # Check for exact structural hash match
-                if (feat1['structural_hash'] == feat2['structural_hash'] and 
-                    feat1['structural_hash'] != 0):
-                    # Even for "exact" matches, calculate detailed similarity
-                    score = self._calculate_similarity(feat1, feat2)
-                    # Boost score for exact hash match
-                    score = min(1.0, score + 0.1)
-                    if score > best_score:
-                        best_score = score
-                        best_match = addr2
-                        
-            if best_match and best_score > 0.6:  # Lowered threshold for real binary diffing
-                self.matched_funcs[addr1] = (best_match, best_score)
-                used_funcs2.add(best_match)
-                
-        # Phase 2: Name-based matching
-        for addr1, feat1 in features1.items():
-            if addr1 in self.matched_funcs or self.cancelled:
-                continue
-                
-            best_match = None
-            best_score = 0
-            
-            for addr2, feat2 in features2.items():
-                if addr2 in used_funcs2:
-                    continue
-                    
-                # Name similarity
-                if feat1['name'] == feat2['name'] and feat1['name'] != 'sub_*':
-                    # Calculate detailed similarity even for name matches
-                    score = self._calculate_similarity(feat1, feat2)
-                    # Boost score for exact name match
-                    score = min(1.0, score + 0.05)
-                    if score > best_score:
-                        best_score = score
-                        best_match = addr2
-                        
-            if best_match and best_score > 0.5:  # Lowered threshold for real binary diffing
-                self.matched_funcs[addr1] = (best_match, best_score)
-                used_funcs2.add(best_match)
-                
-        # Phase 3: Structural similarity
-        for addr1, feat1 in features1.items():
-            if addr1 in self.matched_funcs or self.cancelled:
-                continue
-                
-            best_match = None
-            best_score = 0
-            
-            for addr2, feat2 in features2.items():
-                if addr2 in used_funcs2:
-                    continue
-                    
-                # Calculate similarity score
-                score = self._calculate_similarity(feat1, feat2)
-                if score > best_score and score > 0.4:  # Lower minimum threshold
-                    best_score = score
-                    best_match = addr2
-                    
-            if best_match and best_score > 0.4:  # Lower threshold for real binary diffing
-                self.matched_funcs[addr1] = (best_match, best_score)
-                used_funcs2.add(best_match)
-                
-    def _calculate_similarity(self, feat1, feat2):
-        """Calculate similarity between two functions using original algorithm"""
-        try:
-            # Convert our feature format to the original format expected by the algorithm
-            func1 = {
-                'function_hash': feat1.get('structural_hash', 0),
-                'basic_block_count': feat1.get('basic_block_count', 0),
-                'instruction_count': feat1.get('instruction_count', 0),
-                'edge_count': feat1.get('basic_block_count', 0),  # Use BB count as edge approximation
-                'mnemonic_hist': {},  # Not available in current format
-                'string_refs': [],  # Not available in current format
-                'callgraph': {'call_count': 0, 'caller_count': 0},  # Not available
-                'control_flow': {'node_count': feat1.get('basic_block_count', 0), 'density': 0.5, 'is_connected': True},
-                'numeric_consts': [],  # Not available in current format
-                'function_primes': [],  # Not available in current format
-                'name': feat1.get('name', '')
-            }
-            
-            func2 = {
-                'function_hash': feat2.get('structural_hash', 0),
-                'basic_block_count': feat2.get('basic_block_count', 0),
-                'instruction_count': feat2.get('instruction_count', 0),
-                'edge_count': feat2.get('basic_block_count', 0),  # Use BB count as edge approximation
-                'mnemonic_hist': {},  # Not available in current format
-                'string_refs': [],  # Not available in current format
-                'callgraph': {'call_count': 0, 'caller_count': 0},  # Not available
-                'control_flow': {'node_count': feat2.get('basic_block_count', 0), 'density': 0.5, 'is_connected': True},
-                'numeric_consts': [],  # Not available in current format
-                'function_primes': [],  # Not available in current format
-                'name': feat2.get('name', '')
-            }
-            
-            # Use the original similarity algorithm
-            similarity, technique = self._calculate_similarity_original(func1, func2)
-            
-            # Debug output for similarity calculation
-            if hasattr(self, '_debug_count'):
-                self._debug_count += 1
-            else:
-                self._debug_count = 1
-                
-            if self._debug_count <= 5:  # Only log first 5 calculations
-                log_info(f"Similarity calculation: {feat1['name']} vs {feat2['name']} = {similarity:.4f} ({technique})")
-            
-            return similarity
-            
-        except Exception as e:
-            log_error(f"Error calculating similarity: {e}")
-            return 0.0
-            
-    def _calculate_similarity_original(self, func1, func2):
-        """Original similarity calculation from binary_diffing_plugin.py"""
-        score = 0.0
-        total_weight = 0.0
-        technique_scores = {}
-        
-        try:
-            # Hash similarity (highest weight)
-            weight = 10.0
-            hash_sim = 1.0 if func1["function_hash"] == func2["function_hash"] else 0.0
-            score += weight * hash_sim
-            total_weight += weight
-            technique_scores["Hash Match"] = weight * hash_sim
-            
-            # Basic block count similarity
-            weight = 2.0
-            if func1["basic_block_count"] > 0 and func2["basic_block_count"] > 0:
-                bb_sim = 1.0 - min(1.0, abs(func1["basic_block_count"] - func2["basic_block_count"]) /
-                                max(1, max(func1["basic_block_count"], func2["basic_block_count"])))
-                score += weight * bb_sim
-                total_weight += weight
-                technique_scores["Basic Block Count"] = weight * bb_sim
-                
-            # Instruction count similarity
-            weight = 2.0
-            if func1["instruction_count"] > 0 and func2["instruction_count"] > 0:
-                ins_sim = 1.0 - min(1.0, abs(func1["instruction_count"] - func2["instruction_count"]) /
-                                 max(1, max(func1["instruction_count"], func2["instruction_count"])))
-                score += weight * ins_sim
-                total_weight += weight
-                technique_scores["Instruction Count"] = weight * ins_sim
-                
-            # Edge count similarity
-            weight = 1.5
-            if func1["edge_count"] > 0 and func2["edge_count"] > 0:
-                edge_sim = 1.0 - min(1.0, abs(func1["edge_count"] - func2["edge_count"]) /
-                                  max(1, max(func1["edge_count"], func2["edge_count"])))
-                score += weight * edge_sim
-                total_weight += weight
-                technique_scores["Edge Count"] = weight * edge_sim
-                
-            # Mnemonic histogram similarity (high weight)
-            weight = 8.0
-            if func1["mnemonic_hist"] and func2["mnemonic_hist"]:
-                mnemonic_sim = self._calculate_histogram_similarity(func1["mnemonic_hist"], func2["mnemonic_hist"])
-                score += weight * mnemonic_sim
-                total_weight += weight
-                technique_scores["Mnemonic Histogram"] = weight * mnemonic_sim
-                
-            # String references (very high weight if non-empty)
-            weight = 7.0
-            if func1.get("string_refs") and func2.get("string_refs"):
-                str_sim = self._calculate_set_similarity(set(func1["string_refs"]), set(func2["string_refs"]))
-                # Reward exact string matches highly
-                if str_sim > 0.8:
-                    weight = 12.0  # Increase weight for strong string matches
-                score += weight * str_sim
-                total_weight += weight
-                technique_scores["String References"] = weight * str_sim
-                
-            # Callgraph similarity
-            weight = 5.0
-            callgraph_score = 0.0
-            if func1.get("callgraph") and func2.get("callgraph"):
-                # Call count similarity
-                if func1["callgraph"]["call_count"] > 0 or func2["callgraph"]["call_count"] > 0:
-                    call_count_sim = 1.0 - min(1.0, abs(func1["callgraph"]["call_count"] - func2["callgraph"]["call_count"]) /
-                                             max(1, max(func1["callgraph"]["call_count"], func2["callgraph"]["call_count"])))
-                    score += weight * call_count_sim
-                    total_weight += weight
-                    callgraph_score += weight * call_count_sim
-                    
-                    # Caller count similarity
-                    caller_count_sim = 1.0 - min(1.0, abs(func1["callgraph"]["caller_count"] - func2["callgraph"]["caller_count"]) /
-                                               max(1, max(func1["callgraph"]["caller_count"], func2["callgraph"]["caller_count"])))
-                    score += weight * caller_count_sim
-                    total_weight += weight
-                    callgraph_score += weight * caller_count_sim
-            technique_scores["Callgraph"] = callgraph_score
-            
-            # Control flow graph features
-            control_flow_score = 0.0
-            if func1.get("control_flow") and func2.get("control_flow"):
-                weight = 4.0
-                cf1 = func1["control_flow"]
-                cf2 = func2["control_flow"]
-                
-                # Compare node and edge counts
-                if "node_count" in cf1 and "node_count" in cf2 and cf1["node_count"] > 0 and cf2["node_count"] > 0:
-                    node_sim = 1.0 - min(1.0, abs(cf1["node_count"] - cf2["node_count"]) /
-                                       max(1, max(cf1["node_count"], cf2["node_count"])))
-                    score += weight * node_sim
-                    total_weight += weight
-                    control_flow_score += weight * node_sim
-                    
-                # Compare density if available
-                if "density" in cf1 and "density" in cf2:
-                    dens_sim = 1.0 - min(1.0, abs(cf1["density"] - cf2["density"]) /
-                                        max(0.001, max(cf1["density"], cf2["density"])))
-                    score += weight * dens_sim
-                    total_weight += weight
-                    control_flow_score += weight * dens_sim
-                    
-                # Compare connectivity
-                if "is_connected" in cf1 and "is_connected" in cf2:
-                    if cf1["is_connected"] == cf2["is_connected"]:
-                        score += weight
-                        control_flow_score += weight
-                    total_weight += weight
-            technique_scores["Control Flow"] = control_flow_score
-            
-            # Numeric constants
-            weight = 3.0
-            if func1.get("numeric_consts") and func2.get("numeric_consts"):
-                # For numeric constants, use Jaccard similarity but only consider values < 65536
-                # to avoid comparing addresses
-                const1 = set(x for x in func1["numeric_consts"] if x < 65536)
-                const2 = set(x for x in func2["numeric_consts"] if x < 65536)
-                if const1 or const2:
-                    num_sim = self._calculate_set_similarity(const1, const2)
-                    score += weight * num_sim
-                    total_weight += weight
-                    technique_scores["Numeric Constants"] = weight * num_sim
-                    
-            # Prime-based similarity (medium weight)
-            weight = 6.0
-            if func1.get("function_primes") and func2.get("function_primes"):
-                prime_sim = self._calculate_prime_similarity(func1["function_primes"], func2["function_primes"])
-                score += weight * prime_sim
-                total_weight += weight
-                technique_scores["Prime Features"] = weight * prime_sim
-                
-            # Name similarity as a final hint (low weight)
-            weight = 1.0
-            name1 = func1["name"].lower()
-            name2 = func2["name"].lower()
-            
-            # Strip common prefixes if present
-            prefixes = ["sub_", "fcn_", "fcn.", "function_", "func_", "f_"]
-            for prefix in prefixes:
-                if name1.startswith(prefix):
-                    name1 = name1[len(prefix):]
-                if name2.startswith(prefix):
-                    name2 = name2[len(prefix):]
-                    
-            # Compare names if they're not just addresses
-            if not (name1.startswith("0x") and name2.startswith("0x")):
-                name_sim = 1.0 if name1 == name2 else 0.0
-                score += weight * name_sim
-                total_weight += weight
-                technique_scores["Name Similarity"] = weight * name_sim
-                
-            # Normalize score to 0-1 range
-            final_score = score / total_weight if total_weight > 0 else 0.0
-            
-            # Apply a small random jitter to prevent identical scores for similar but different functions
-            jitter = random.uniform(-0.001, 0.001)
-            final_score = max(0.0, min(1.0, final_score + jitter))
-            
-            # Determine the dominant technique
-            dominant_technique = "Mixed"
-            if technique_scores:
-                # Find the technique with the highest contribution
-                max_score = max(technique_scores.values())
-                if max_score > 0:
-                    dominant_technique = max(technique_scores, key=technique_scores.get)
-                    # If hash match is perfect, prioritize it
-                    if technique_scores.get("Hash Match", 0) >= 10.0:
-                        dominant_technique = "Hash Match"
-                        
-            return final_score, dominant_technique
-            
-        except Exception as e:
-            log_error(f"Error calculating similarity: {e}")
-            return 0.0, "Error"
-            
-    def _calculate_histogram_similarity(self, hist1, hist2):
-        """Calculate similarity between two histograms using cosine similarity"""
-        all_keys = set(hist1.keys()) | set(hist2.keys())
-        
-        dot_product = 0
-        mag1 = 0
-        mag2 = 0
-        
-        for key in all_keys:
-            val1 = hist1.get(key, 0)
-            val2 = hist2.get(key, 0)
-            dot_product += val1 * val2
-            mag1 += val1 * val1
-            mag2 += val2 * val2
-            
-        mag1 = mag1 ** 0.5
-        mag2 = mag2 ** 0.5
-        
-        if mag1 == 0 or mag2 == 0:
-            return 0.0
-            
-        return dot_product / (mag1 * mag2)
-        
-    def _calculate_set_similarity(self, set1, set2):
-        """Calculate Jaccard similarity between two sets"""
-        if not set1 and not set2:
-            return 1.0  # Both empty sets are identical
-            
-        intersection = len(set1 & set2)
-        union = len(set1 | set2)
-        
-        return intersection / union if union > 0 else 0.0
-        
-    def _calculate_prime_similarity(self, primes1, primes2):
-        """Calculate similarity between two lists of primes using multiple metrics"""
-        try:
-            if not primes1 and not primes2:
-                return 1.0  # Both empty lists are identical
-                
-            if not primes1 or not primes2:
-                return 0.0  # One empty, one not
-                
-            # Convert to sets for Jaccard similarity
-            set1 = set(primes1)
-            set2 = set(primes2)
-            jaccard_sim = self._calculate_set_similarity(set1, set2)
-            
-            # Calculate ratio similarity (how similar are the prime set sizes)
-            ratio_sim = 1.0 - min(1.0, abs(len(primes1) - len(primes2)) / max(len(primes1), len(primes2)))
-            
-            # Calculate product similarity (compare products of small primes)
-            # Use only first few primes to avoid overflow
-            product1 = 1
-            product2 = 1
-            max_primes = min(5, len(primes1), len(primes2))  # Use first 5 primes max
-            
-            for i in range(max_primes):
-                if i < len(primes1):
-                    product1 *= primes1[i]
-                if i < len(primes2):
-                    product2 *= primes2[i]
-                    
-            # Calculate similarity based on product ratio
-            if product1 == product2:
-                product_sim = 1.0
-            elif product1 == 0 or product2 == 0:
-                product_sim = 0.0
-            else:
-                ratio = min(product1, product2) / max(product1, product2)
-                product_sim = ratio
-                
-            # Weighted combination of similarity metrics
-            final_sim = (0.5 * jaccard_sim + 0.3 * ratio_sim + 0.2 * product_sim)
-            
-            return min(1.0, max(0.0, final_sim))
-            
-        except Exception as e:
-            log_error(f"Error calculating prime similarity: {e}")
-            return 0.0
-            
-    def _get_match_technique(self, addr1, addr2) -> str:
-        """Get the technique used for this match"""
-        # This is simplified - in the full version we'd track which phase matched
-        return "Structural"
 
 
-def convert_results_to_gui_format(results, bv1, bv2):
-    """Convert BinaryDiffTask results to GUI format"""
-    gui_results = {
-        'binary_a_name': bv1.file.filename,
-        'binary_b_name': bv2.file.filename,
-        'analysis_time': 0.0,  # TODO: track actual time
-        'matched_functions': [],
-        'unmatched_functions_a': [],
-        'unmatched_functions_b': []
-    }
-    
-    for match in results:
-        try:
-            # Convert function info to GUI format
-            func_a_info = {
-                'name': match.func1.symbol.short_name,
-                'address': match.func1.start,
-                'size': match.func1.total_bytes,
-                'basic_blocks': [{'address': bb.start, 'size': bb.length} for bb in match.func1.basic_blocks],
-                'instructions': []  # Could be populated if needed
-            }
-            
-            func_b_info = {
-                'name': match.func2.symbol.short_name,
-                'address': match.func2.start,
-                'size': match.func2.total_bytes,
-                'basic_blocks': [{'address': bb.start, 'size': bb.length} for bb in match.func2.basic_blocks],
-                'instructions': []  # Could be populated if needed
-            }
-            
-            match_info = {
-                'function_a': func_a_info,
-                'function_b': func_b_info,
-                'similarity': match.similarity,
-                'confidence': match.confidence,
-                'match_type': match.technique
-            }
-            
-            gui_results['matched_functions'].append(match_info)
-            
-        except Exception as e:
-            log_error(f"Error converting match result: {e}")
-    
-    return gui_results
+def _log_summary(result):
+    matches = sorted(
+        result.get("matched_functions", []),
+        key=lambda m: (-m.get("confidence", 0), -m.get("similarity", 0)),
+    )
+    log_info("=" * 60)
+    log_info(f"BINARY DIFF RESULTS - {len(matches)} MATCHES FOUND")
+    log_info(f"Binary 1: {result.get('binary_a_name')}")
+    log_info(f"Binary 2: {result.get('binary_b_name')}")
+    log_info(f"Overall similarity: {result.get('similarity_score', 0):.4f}")
+    log_info("-" * 60)
+
+    by_type = {}
+    for m in matches:
+        by_type[m.get("match_type", "?")] = by_type.get(m.get("match_type", "?"), 0) + 1
+    for match_type, count in sorted(by_type.items()):
+        log_info(f"  {match_type}: {count}")
+
+    for i, m in enumerate(matches[:25]):
+        fa, fb = m.get("function_a", {}), m.get("function_b", {})
+        log_info(
+            f"{i+1:3d}. {fa.get('name')} <-> {fb.get('name')}  "
+            f"sim={m.get('similarity', 0):.3f} conf={m.get('confidence', 0):.3f} "
+            f"[{m.get('match_type')}]"
+        )
+    if len(matches) > 25:
+        log_info(f"  ... and {len(matches) - 25} more (see GUI/export)")
+    log_info("=" * 60)
+
 
 def run_binary_diff(bv):
     """Main function to run binary diffing"""
-    # Get target binary file
+    if load_rust_engine() is None:
+        return
+
     target_file = get_open_filename_input("Select target binary for comparison", "*.bndb")
     if not target_file:
         return
-        
+
     try:
-        # Load the target binary
         target_bv = bn.load(target_file)
         if not target_bv:
             log_error(f"Failed to load target binary: {target_file}")
             return
-            
+
         log_info(f"Starting diff between {bv.file.filename} and {target_bv.file.filename}")
-        
-        # Create and start the diff task
+
         diff_task = BinaryDiffTask(bv, target_bv)
         diff_task.start()
-        
-        # Wait for completion (in a real implementation, this would be handled by the UI)
         diff_task.join()
-        
-        # Display results
-        if diff_task.results:
-            # Sort results by similarity score (highest first)
-            sorted_results = sorted(diff_task.results, key=lambda x: x.similarity, reverse=True)
-            
-            log_info("=" * 60)
-            log_info(f"BINARY DIFF RESULTS - {len(sorted_results)} MATCHES FOUND")
-            log_info("=" * 60)
-            log_info(f"Binary 1: {bv.file.filename}")
-            log_info(f"Binary 2: {target_bv.file.filename}")
-            log_info("-" * 60)
-            
-            # Show all results
-            for i, match in enumerate(sorted_results):
-                log_info(f"{i+1:3d}. {match.func1.name} <-> {match.func2.name}")
-                log_info(f"     Similarity: {match.similarity:.3f} | Technique: {match.technique}")
-                log_info(f"     Addresses: 0x{match.func1.start:x} <-> 0x{match.func2.start:x}")
-                log_info(f"     Sizes: {match.func1.total_bytes} bytes <-> {match.func2.total_bytes} bytes")
-                log_info("")
-                
-            log_info("=" * 60)
-            log_info(f"SUMMARY: {len(sorted_results)} total matches")
-            
-            # Show statistics
-            high_confidence = len([m for m in sorted_results if m.similarity >= 0.9])
-            medium_confidence = len([m for m in sorted_results if 0.7 <= m.similarity < 0.9])
-            low_confidence = len([m for m in sorted_results if m.similarity < 0.7])
-            
-            log_info(f"High confidence (≥0.9): {high_confidence}")
-            log_info(f"Medium confidence (0.7-0.9): {medium_confidence}")
-            log_info(f"Low confidence (<0.7): {low_confidence}")
-            log_info("=" * 60)
-            
-            # Show Qt GUI if available
-            if HAS_GUI:
-                try:
-                    # Convert results to GUI format
-                    gui_results = convert_results_to_gui_format(sorted_results, bv, target_bv)
-                    
-                    # Show GUI directly in main thread (Binary Ninja can handle this)
-                    window = show_diff_results(gui_results, bv, target_bv)
-                    
-                    if window:
-                        log_info("Qt GUI window opened for detailed results")
-                        log_info("Features available:")
-                        log_info("  - Sort columns by clicking headers")
-                        log_info("  - Click on addresses to navigate Binary Ninja view")
-                        log_info("  - Filter by match type, similarity, confidence")
-                        log_info("  - Export to CSV, SQLite, JSON, HTML")
-                        log_info("  - View summary statistics")
-                    else:
-                        log_error("Failed to create Qt GUI window")
-                        
-                except Exception as e:
-                    log_error(f"Failed to show GUI: {e}")
-                    log_error("Try installing PySide6: pip install PySide6")
-            else:
-                log_info("Qt GUI not available. Install PySide6 or PySide2 for enhanced UI features.")
-                log_info("Run: python install_pyside.py in the plugin directory")
-        else:
+
+        result = diff_task.result
+        if not result or not result.get("matched_functions"):
             log_info("No function matches found")
-            
+            return
+
+        _log_summary(result)
+
+        if HAS_GUI:
+            try:
+                window = show_diff_results(result, bv, target_bv)
+                if window:
+                    log_info("Qt GUI window opened for detailed results")
+                else:
+                    log_error("Failed to create Qt GUI window")
+            except Exception as e:
+                log_error(f"Failed to show GUI: {e}")
+        else:
+            log_info("Qt GUI not available. Install PySide6 for enhanced UI features.")
+
     except Exception as e:
         log_error(f"Error during binary diffing: {e}")
+
 
 # Register the plugin command
 try:

@@ -10,7 +10,8 @@ pub mod matching;
 pub mod database;
 pub mod ui;
 pub mod ffi;
-pub mod mock;
+pub mod il;
+pub mod block;
 
 pub use types::*;
 pub use algorithms::*;
@@ -36,20 +37,78 @@ impl BinaryDiffEngine {
         }
     }
 
-    pub fn extract_function_info_mock(&self, binary_name: &str) -> Result<Vec<FunctionInfo>> {
-        mock::generate_mock_functions(binary_name)
+    /// Normalize extracted functions: structure-only hashes are computed here
+    /// (not in the extractor) so they are deterministic and consistent across
+    /// frontends. cfg_hash = WL labeled-graph hash, call_graph_hash = local
+    /// call-graph degree signature.
+    pub fn preprocess_functions(functions: &mut [FunctionInfo]) {
+        use sha2::{Digest, Sha256};
+        for func in functions.iter_mut() {
+            func.cfg_hash = DiffAlgorithms::calculate_wl_cfg_hash(func);
+            func.call_graph_hash = format!("cg:{}:{}", func.callees.len(), func.callers.len());
+            func.instruction_count = func.instructions.len();
+            func.call_count = func.callees.len();
+            for bb in func.basic_blocks.iter_mut() {
+                bb.instruction_count = bb.instructions.len();
+                if bb.mnemonic_hash.is_empty() {
+                    let mut hasher = Sha256::new();
+                    for ins in &bb.instructions {
+                        hasher.update(ins.mnemonic.as_bytes());
+                        hasher.update(b" ");
+                    }
+                    bb.mnemonic_hash = hex::encode(&hasher.finalize()[..8]);
+                }
+            }
+        }
     }
 
-    pub fn perform_diff_mock(&self, binary_a_name: &str, binary_b_name: &str) -> Result<DiffResult> {
+    /// Strip bulky per-instruction data from result payloads; counts are kept
+    /// in instruction_count fields so the UI columns stay correct.
+    fn slim_function(func: &mut FunctionInfo) {
+        func.instructions.clear();
+        for bb in func.basic_blocks.iter_mut() {
+            bb.instructions.clear();
+        }
+    }
+
+    /// Diff two binaries from JSON-encoded `Vec<FunctionInfo>` (the FFI path
+    /// used by the Binary Ninja Python frontend).
+    pub fn perform_diff_json(&self, json_a: &str, json_b: &str) -> Result<DiffResult> {
+        let mut functions_a: Vec<FunctionInfo> =
+            serde_json::from_str(json_a).context("Failed to parse functions for binary A")?;
+        let mut functions_b: Vec<FunctionInfo> =
+            serde_json::from_str(json_b).context("Failed to parse functions for binary B")?;
+
+        Self::preprocess_functions(&mut functions_a);
+        Self::preprocess_functions(&mut functions_b);
+
+        let mut result = self.diff_functions(functions_a, functions_b, "binary_a", "binary_b")?;
+
+        for m in result.matched_functions.iter_mut() {
+            Self::slim_function(&mut m.function_a);
+            Self::slim_function(&mut m.function_b);
+        }
+        for f in result.unmatched_functions_a.iter_mut() {
+            Self::slim_function(f);
+        }
+        for f in result.unmatched_functions_b.iter_mut() {
+            Self::slim_function(f);
+        }
+
+        Ok(result)
+    }
+
+    fn diff_functions(
+        &self,
+        functions_a: Vec<FunctionInfo>,
+        functions_b: Vec<FunctionInfo>,
+        binary_a_name: &str,
+        binary_b_name: &str,
+    ) -> Result<DiffResult> {
         let start_time = Instant::now();
 
-        info!("Starting binary diff analysis");
-
-        let functions_a = self.extract_function_info_mock(binary_a_name)?;
-        let functions_b = self.extract_function_info_mock(binary_b_name)?;
-
         info!(
-            "Extracted {} functions from binary A, {} from binary B",
+            "Diffing {} functions against {}",
             functions_a.len(),
             functions_b.len()
         );

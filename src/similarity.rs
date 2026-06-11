@@ -43,32 +43,29 @@ impl SimilarityAnalyzer {
         dot_product / (norm_a.sqrt() * norm_b.sqrt())
     }
 
-    /// Calculate edit distance between two strings
+    /// Calculate edit distance between two strings.
+    /// Uses indexed char vectors and two rolling rows: O(n*m) time, O(m) space
+    /// (the old version called chars().nth() in the inner loop — O(n*m*max(n,m))).
     pub fn edit_distance(s1: &str, s2: &str) -> usize {
-        let len1 = s1.len();
-        let len2 = s2.len();
-        let mut dp = vec![vec![0; len2 + 1]; len1 + 1];
-        
-        // Initialize base cases
-        for i in 0..=len1 {
-            dp[i][0] = i;
-        }
-        for j in 0..=len2 {
-            dp[0][j] = j;
-        }
-        
-        // Fill DP table
-        for i in 1..=len1 {
-            for j in 1..=len2 {
-                if s1.chars().nth(i - 1) == s2.chars().nth(j - 1) {
-                    dp[i][j] = dp[i - 1][j - 1];
+        let a: Vec<char> = s1.chars().collect();
+        let b: Vec<char> = s2.chars().collect();
+
+        let mut prev: Vec<usize> = (0..=b.len()).collect();
+        let mut curr = vec![0usize; b.len() + 1];
+
+        for i in 1..=a.len() {
+            curr[0] = i;
+            for j in 1..=b.len() {
+                curr[j] = if a[i - 1] == b[j - 1] {
+                    prev[j - 1]
                 } else {
-                    dp[i][j] = 1 + dp[i - 1][j].min(dp[i][j - 1]).min(dp[i - 1][j - 1]);
-                }
+                    1 + prev[j].min(curr[j - 1]).min(prev[j - 1])
+                };
             }
+            std::mem::swap(&mut prev, &mut curr);
         }
-        
-        dp[len1][len2]
+
+        prev[b.len()]
     }
 
     /// Calculate normalized edit distance (0.0 to 1.0)
@@ -104,19 +101,30 @@ impl SimilarityAnalyzer {
         if instrs_a.is_empty() || instrs_b.is_empty() {
             return 0.0;
         }
-        
-        // Create mnemonic sequences
-        let seq_a: String = instrs_a.iter()
-            .map(|instr| instr.mnemonic.clone())
-            .collect::<Vec<_>>()
-            .join(" ");
-        
-        let seq_b: String = instrs_b.iter()
-            .map(|instr| instr.mnemonic.clone())
-            .collect::<Vec<_>>()
-            .join(" ");
-        
-        Self::normalized_edit_distance(&seq_a, &seq_b)
+
+        // Token-level edit distance over mnemonics (one token per instruction,
+        // not per character), capped so huge functions don't blow up the
+        // O(n*m) DP inside the pairwise fuzzy phase.
+        const MAX_TOKENS: usize = 512;
+        let seq_a: Vec<&str> = instrs_a.iter().take(MAX_TOKENS).map(|i| i.mnemonic.as_str()).collect();
+        let seq_b: Vec<&str> = instrs_b.iter().take(MAX_TOKENS).map(|i| i.mnemonic.as_str()).collect();
+
+        let mut prev: Vec<usize> = (0..=seq_b.len()).collect();
+        let mut curr = vec![0usize; seq_b.len() + 1];
+        for i in 1..=seq_a.len() {
+            curr[0] = i;
+            for j in 1..=seq_b.len() {
+                curr[j] = if seq_a[i - 1] == seq_b[j - 1] {
+                    prev[j - 1]
+                } else {
+                    1 + prev[j].min(curr[j - 1]).min(prev[j - 1])
+                };
+            }
+            std::mem::swap(&mut prev, &mut curr);
+        }
+        let dist = prev[seq_b.len()];
+        let max_len = seq_a.len().max(seq_b.len());
+        1.0 - dist as f64 / max_len as f64
     }
 
     /// Calculate control flow similarity using graph comparison
@@ -224,13 +232,23 @@ impl SimilarityAnalyzer {
         
         for instr in &func.instructions {
             for operand in &instr.operands {
-                // Look for immediate values (constants)
-                if operand.starts_with('#') || operand.starts_with("0x") || operand.parse::<i64>().is_ok() {
-                    constants.insert(operand.clone());
+                // Only keep small immediates: large values are almost always
+                // addresses, which differ between builds and poison the
+                // Jaccard score (same cutoff BinDiff/Diaphora use).
+                let raw = operand.trim_start_matches('#');
+                let value = if let Some(hex) = raw.strip_prefix("0x") {
+                    u64::from_str_radix(hex, 16).ok()
+                } else {
+                    raw.parse::<i64>().ok().map(|v| v.unsigned_abs())
+                };
+                if let Some(v) = value {
+                    if v < 0x10000 {
+                        constants.insert(format!("{:#x}", v));
+                    }
                 }
             }
         }
-        
+
         constants
     }
 

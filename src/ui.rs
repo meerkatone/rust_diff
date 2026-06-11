@@ -96,9 +96,9 @@ fn generate_report_with_colors(diff_result: &DiffResult, c: &ReportColors) -> St
             else { c.confidence_low };
 
         let mc = match m.match_type {
-            MatchType::Exact => c.match_exact,
-            MatchType::Structural => c.match_structural,
-            MatchType::Heuristic => c.match_heuristic,
+            MatchType::Exact | MatchType::Name => c.match_exact,
+            MatchType::MdIndex | MatchType::SmallPrimes | MatchType::Structural => c.match_structural,
+            MatchType::CallGraph | MatchType::Heuristic => c.match_heuristic,
             MatchType::Manual => c.match_manual,
         };
 

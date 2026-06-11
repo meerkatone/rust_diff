@@ -12,6 +12,34 @@ import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+
+def _instr_count(func):
+    """Instruction count for a function dict. Result payloads from the Rust
+    engine carry counts in 'instruction_count' (instruction lists are stripped
+    to keep the JSON small); fall back to the list length for older formats."""
+    return func.get('instruction_count') or len(func.get('instructions', []))
+
+
+_ENGINE = None
+
+
+def _engine():
+    """Lazily import the plugin package (which holds the IL extraction / FFI
+    helpers) without a circular import at module load. Returns None if the
+    semantic-diff path is unavailable, so callers fall back to textual diff."""
+    global _ENGINE
+    if _ENGINE is not None:
+        return _ENGINE
+    for name in ("rust_diff", "__init__"):
+        try:
+            mod = __import__(name)
+            if hasattr(mod, "il_diff") and hasattr(mod, "extract_il_function"):
+                _ENGINE = mod
+                return mod
+        except Exception:
+            continue
+    return None
+
 try:
     from PySide6.QtCore import (
         QAbstractTableModel,
@@ -110,7 +138,14 @@ class SideBySideDiffWidget(QWidget):
         self.binary_view_b = None
         self.current_function_a = None
         self.current_function_b = None
+        # Matched A function address -> B function address (set by the window).
+        self.match_index = {}
         self.setup_ui()
+
+    def set_match_index(self, match_index):
+        """Provide the matcher's A->B function-address map so the semantic diff
+        can resolve renamed/relocated matched callees."""
+        self.match_index = match_index or {}
 
     def setup_ui(self):
         """Setup the side-by-side diff UI"""
@@ -167,7 +202,10 @@ class SideBySideDiffWidget(QWidget):
         # Diff mode selector
         view_mode_layout.addWidget(QLabel("Diff Mode:"))
         self.diff_mode_combo = QComboBox()
-        self.diff_mode_combo.addItems(["Side-by-Side", "Unified Diff"])
+        # "Semantic (IL-aware)" normalizes volatile tokens and resolves matched
+        # callee renames, so a renamed call reads as cosmetic and a replaced
+        # call as a real change (IL/Pseudo-C views only).
+        self.diff_mode_combo.addItems(["Side-by-Side", "Unified Diff", "Semantic (IL-aware)"])
         self.diff_mode_combo.currentTextChanged.connect(self.update_view)
         view_mode_layout.addWidget(self.diff_mode_combo)
 
@@ -314,6 +352,12 @@ class SideBySideDiffWidget(QWidget):
         view_mode = self.view_mode_combo.currentText()
         diff_mode = self.diff_mode_combo.currentText()
 
+        # Semantic diff operates on IL token streams, not rendered text.
+        if diff_mode.startswith("Semantic"):
+            if self._show_semantic_diff(view_mode):
+                return
+            # Fell through (unsupported view / IL unavailable): textual fallback.
+
         # Get the text content for both functions
         text_a = self._get_function_text(self.current_function_a, view_mode, self.binary_view_a)
         text_b = self._get_function_text(self.current_function_b, view_mode, self.binary_view_b)
@@ -322,6 +366,147 @@ class SideBySideDiffWidget(QWidget):
             self._show_side_by_side(text_a, text_b)
         else:
             self._show_unified_diff(text_a, text_b)
+
+    # Binary Ninja IL view names -> the level token used by the engine.
+    _SEMANTIC_LEVELS = {
+        "Low Level IL": "LLIL",
+        "Medium Level IL": "MLIL",
+        "High Level IL": "HLIL",
+        "Pseudo-C": "HLIL",  # Pseudo-C is rendered from HLIL
+    }
+
+    def _build_callee_maps(self, func_a, func_b):
+        """Build (rename_map, addr_map) for func_a's callees using the matcher's
+        A->B function-address index, so renamed/relocated *matched* callees
+        normalize equal in the semantic diff while genuinely-different targets
+        stay flagged. Falls back to no mapping when the match index is empty."""
+        rename_map = {}
+        addr_map = {}
+        if not self.match_index:
+            return rename_map, addr_map
+        try:
+            callees_a = func_a.callees
+        except Exception:
+            return rename_map, addr_map
+        for ca in callees_a:
+            addr_b = self.match_index.get(ca.start)
+            if addr_b is None:
+                continue
+            cb = self.binary_view_b.get_function_at(addr_b) if self.binary_view_b else None
+            if cb is None:
+                continue
+            # Symbol rename (different names for the same matched callee).
+            if ca.name and cb.name and ca.name != cb.name:
+                rename_map[ca.name] = cb.name
+            # Address relocation (literal code-address call targets).
+            if ca.start != cb.start:
+                addr_map[f"0x{ca.start:x}"] = f"0x{cb.start:x}"
+        return rename_map, addr_map
+
+    def _show_semantic_diff(self, view_mode):
+        """Render the IL-aware diff for an IL/Pseudo-C view. Returns False if
+        the view is unsupported or IL/engine is unavailable (caller falls back
+        to the textual diff)."""
+        level = self._SEMANTIC_LEVELS.get(view_mode)
+        engine = _engine()
+        if level is None or engine is None:
+            return False
+        if not self.binary_view_a or not self.binary_view_b:
+            return False
+
+        try:
+            func_a = self.binary_view_a.get_function_at(self.current_function_a.get('address', 0))
+            func_b = self.binary_view_b.get_function_at(self.current_function_b.get('address', 0))
+        except Exception:
+            return False
+        if not func_a or not func_b:
+            return False
+
+        il_a = engine.extract_il_function(func_a, level)
+        il_b = engine.extract_il_function(func_b, level)
+        if il_a is None or il_b is None:
+            return False
+
+        rename_map, addr_map = self._build_callee_maps(func_a, func_b)
+        diff = engine.il_diff(il_a, il_b, rename_map, addr_map)
+        if diff is None:
+            return False
+
+        self._render_semantic_diff(diff)
+        return True
+
+    # Per-op styling: equal is neutral; rename is cosmetic (dim blue, no
+    # alarm); replace/delete (A) and replace/insert (B) get the usual red/green.
+    _OP_STYLE_A = {
+        "equal":   ("#1e1e1e", "#d4d4d4", "#858585"),
+        "rename":  ("#1e2a3a", "#7fb0e0", "#5a7fa0"),
+        "replace": ("#4a1f1f", "#ff6b6b", "#ff9999"),
+        "delete":  ("#4a1f1f", "#ff6b6b", "#ff9999"),
+        "insert":  ("#2a2a2a", "#666666", "#555555"),  # placeholder on A side
+    }
+    _OP_STYLE_B = {
+        "equal":   ("#1e1e1e", "#d4d4d4", "#858585"),
+        "rename":  ("#1e2a3a", "#7fb0e0", "#5a7fa0"),
+        "replace": ("#1f4a1f", "#6bff6b", "#99ff99"),
+        "insert":  ("#1f4a1f", "#6bff6b", "#99ff99"),
+        "delete":  ("#2a2a2a", "#666666", "#555555"),  # placeholder on B side
+    }
+
+    # Inline emphasis for the specific changed token(s) within a replace/rename
+    # line: brighter background + bold so the eye lands on what actually changed.
+    _SPAN_EMPHASIS = "background-color: #6e2b2b; color: #ffd0d0; font-weight: bold;"
+
+    def _semantic_row(self, style, num, text, spans=None):
+        bg, fg, numfg = style
+        if text is None:
+            return (f'<div style="background-color: {bg};">'
+                    f'<span style="color: {numfg}; user-select: none;">&nbsp;&nbsp;&nbsp;&nbsp;</span>'
+                    f'&nbsp;&nbsp;{"&nbsp;" * 50}</div>')
+        # Token-level highlighting when spans are available. Concatenating the
+        # span texts reproduces the line verbatim (including leading indent and
+        # spacing), so no extra indent handling is needed.
+        if spans:
+            body = "".join(
+                (f'<span style="{self._SPAN_EMPHASIS}">{self._escape_html(s.get("text", ""))}</span>'
+                 if s.get("changed") else self._escape_html(s.get("text", "")))
+                for s in spans
+            )
+        else:
+            body = self._escape_html(text)
+        return (f'<div style="background-color: {bg}; color: {fg};">'
+                f'<span style="color: {numfg}; user-select: none;">{num:4d}</span>'
+                f'&nbsp;&nbsp;{body}</div>')
+
+    def _render_semantic_diff(self, diff):
+        """Render an engine IlDiff (list of {op, a, b}) into the two panes."""
+        html_a, html_b = [], []
+        num_a = num_b = 1
+        for line in diff.get("lines", []):
+            op = line.get("op", "equal")
+            a_text, b_text = line.get("a"), line.get("b")
+            a_spans, b_spans = line.get("a_spans"), line.get("b_spans")
+
+            if a_text is not None:
+                html_a.append(self._semantic_row(
+                    self._OP_STYLE_A.get(op, self._OP_STYLE_A["equal"]), num_a, a_text, a_spans))
+                num_a += 1
+            else:
+                html_a.append(self._semantic_row(self._OP_STYLE_A["insert"], 0, None))
+
+            if b_text is not None:
+                html_b.append(self._semantic_row(
+                    self._OP_STYLE_B.get(op, self._OP_STYLE_B["equal"]), num_b, b_text, b_spans))
+                num_b += 1
+            else:
+                html_b.append(self._semantic_row(self._OP_STYLE_B["delete"], 0, None))
+
+        sim = diff.get("similarity", 0.0)
+        header = (f'<div style="background-color: #2a2a2a; color: #aaa;">'
+                  f'&nbsp;Semantic similarity: {sim:.3f} '
+                  f'&mdash; blue = cosmetic rename, red/green = real change</div>')
+        wrap = '<pre style="font-family: Courier; font-size: 18pt; margin: 0; padding: 0;">'
+        self.text_a.setHtml(wrap + header + ''.join(html_a) + '</pre>')
+        self.text_b.setHtml(wrap + header + ''.join(html_b) + '</pre>')
 
     def _get_function_text(self, func_info, view_mode, binary_view):
         """Get the text representation of a function based on view mode"""
@@ -642,9 +827,9 @@ class DiffResultsTableModel(QAbstractTableModel):
             elif column == 10:  # BB Count B
                 return str(len(result.get('function_b', {}).get('basic_blocks', [])))
             elif column == 11:  # Instr Count A
-                return str(len(result.get('function_a', {}).get('instructions', [])))
+                return str(_instr_count(result.get('function_a', {})))
             elif column == 12:  # Instr Count B
-                return str(len(result.get('function_b', {}).get('instructions', [])))
+                return str(_instr_count(result.get('function_b', {})))
 
         elif role == Qt.BackgroundRole:
             # Use default dark background for all columns
@@ -684,9 +869,9 @@ class DiffResultsTableModel(QAbstractTableModel):
         elif column == 10:  # BB Count B
             key = lambda x: len(x.get('function_b', {}).get('basic_blocks', []))
         elif column == 11:  # Instr Count A
-            key = lambda x: len(x.get('function_a', {}).get('instructions', []))
+            key = lambda x: _instr_count(x.get('function_a', {}))
         elif column == 12:  # Instr Count B
-            key = lambda x: len(x.get('function_b', {}).get('instructions', []))
+            key = lambda x: _instr_count(x.get('function_b', {}))
         else:
             key = lambda x: 0
 
@@ -735,6 +920,9 @@ class DiffResultsWindow(QMainWindow):
         # Side-by-side diff tab (NEW - first tab for easy access)
         self.diff_tab = SideBySideDiffWidget()
         self.diff_tab.set_binary_views(self.binary_view_a, self.binary_view_b)
+        # Matcher-driven address map (A function address -> B function address)
+        # so the semantic diff can resolve renamed/relocated matched callees.
+        self.diff_tab.set_match_index(self._build_match_index())
         tabs.addTab(self.diff_tab, "Side-by-Side Diff")
 
         # Results tab
@@ -752,6 +940,17 @@ class DiffResultsWindow(QMainWindow):
         tabs.addTab(export_tab, "Export")
         self.setup_export_tab(export_tab)
 
+    def _build_match_index(self):
+        """Map matched A function addresses -> B function addresses, from the
+        diff results. Used to resolve matched callees in the semantic diff."""
+        index = {}
+        for m in (self.results_data or {}).get('matched_functions', []):
+            addr_a = m.get('function_a', {}).get('address')
+            addr_b = m.get('function_b', {}).get('address')
+            if addr_a is not None and addr_b is not None:
+                index[addr_a] = addr_b
+        return index
+
     def setup_results_tab(self, tab):
         """Setup the results display tab"""
         layout = QVBoxLayout(tab)
@@ -763,7 +962,7 @@ class DiffResultsWindow(QMainWindow):
         # Match type filter
         filters_layout.addWidget(QLabel("Match Type:"), 0, 0)
         self.match_type_combo = QComboBox()
-        self.match_type_combo.addItems(["All", "Exact", "Structural", "Heuristic", "Manual"])
+        self.match_type_combo.addItems(["All", "Exact", "Name", "MdIndex", "SmallPrimes", "Structural", "CallGraph", "Heuristic", "IL", "Manual"])
         self.match_type_combo.currentTextChanged.connect(self.apply_filters)
         filters_layout.addWidget(self.match_type_combo, 0, 1)
 
@@ -799,6 +998,8 @@ class DiffResultsWindow(QMainWindow):
         self.table_view.setSortingEnabled(False)  # Disable built-in sorting to use custom sorting
         self.table_view.setAlternatingRowColors(False)  # Disable to allow custom background colors
         self.table_view.setSelectionBehavior(QTableWidget.SelectRows)
+        # Allow selecting multiple rows (ctrl/shift-click) to scope a transfer.
+        self.table_view.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table_view.horizontalHeader().setStretchLastSection(True)
 
         # Set table styling for better contrast with white text
@@ -949,6 +1150,33 @@ class DiffResultsWindow(QMainWindow):
 
         layout.addWidget(diff_export_group)
 
+        # Analysis transfer (A -> B)
+        transfer_group = QGroupBox("Transfer Analysis (Binary A → Binary B)")
+        transfer_layout = QGridLayout(transfer_group)
+
+        self.transfer_name_checkbox = QCheckBox("Names")
+        self.transfer_name_checkbox.setChecked(True)
+        transfer_layout.addWidget(self.transfer_name_checkbox, 0, 0)
+
+        self.transfer_proto_checkbox = QCheckBox("Prototypes / types")
+        self.transfer_proto_checkbox.setChecked(True)
+        transfer_layout.addWidget(self.transfer_proto_checkbox, 0, 1)
+
+        self.transfer_comments_checkbox = QCheckBox("Comments")
+        self.transfer_comments_checkbox.setChecked(True)
+        transfer_layout.addWidget(self.transfer_comments_checkbox, 0, 2)
+
+        self.transfer_vars_checkbox = QCheckBox("Variables (names/types)")
+        self.transfer_vars_checkbox.setChecked(True)
+        transfer_layout.addWidget(self.transfer_vars_checkbox, 0, 3)
+
+        transfer_button = QPushButton("Transfer Matched Functions…")
+        transfer_button.setToolTip("Copy selected attributes from matched A functions onto B (one undo action)")
+        transfer_button.clicked.connect(self.transfer_analysis)
+        transfer_layout.addWidget(transfer_button, 1, 0, 1, 3)
+
+        layout.addWidget(transfer_group)
+
         # Export options
         options_group = QGroupBox("Export Settings")
         options_layout = QGridLayout(options_group)
@@ -1075,13 +1303,13 @@ class DiffResultsWindow(QMainWindow):
             self.table_view.setItem(row, 10, bb_b_item)
 
             # Column 11: Instr Count A (numeric)
-            instr_a_count = len(func_a.get('instructions', []))
+            instr_a_count = _instr_count(func_a)
             instr_a_item = QTableWidgetItem(str(instr_a_count))
             instr_a_item.setData(Qt.UserRole, instr_a_count)
             self.table_view.setItem(row, 11, instr_a_item)
 
             # Column 12: Instr Count B (numeric)
-            instr_b_count = len(func_b.get('instructions', []))
+            instr_b_count = _instr_count(func_b)
             instr_b_item = QTableWidgetItem(str(instr_b_count))
             instr_b_item.setData(Qt.UserRole, instr_b_count)
             self.table_view.setItem(row, 12, instr_b_item)
@@ -1150,10 +1378,12 @@ class DiffResultsWindow(QMainWindow):
         unmatched_a = self.results_data.get('unmatched_functions_a', [])
         unmatched_b = self.results_data.get('unmatched_functions_b', [])
 
-        # Count match types
-        exact_count = sum(1 for m in matched_functions if m.get('match_type') == 'Exact')
-        structural_count = sum(1 for m in matched_functions if m.get('match_type') == 'Structural')
-        heuristic_count = sum(1 for m in matched_functions if m.get('match_type') == 'Heuristic')
+        # Count match types, grouped by evidence strength
+        exact_count = sum(1 for m in matched_functions if m.get('match_type') in ('Exact', 'Name'))
+        structural_count = sum(1 for m in matched_functions
+                               if m.get('match_type') in ('MdIndex', 'SmallPrimes', 'Structural'))
+        heuristic_count = sum(1 for m in matched_functions
+                              if m.get('match_type') in ('CallGraph', 'Heuristic'))
 
         # Calculate averages
         if matched_functions:
@@ -1286,9 +1516,9 @@ class DiffResultsWindow(QMainWindow):
         elif column == 10:  # BB Count B
             return len(func_b.get('basic_blocks', []))
         elif column == 11:  # Instr Count A
-            return len(func_a.get('instructions', []))
+            return _instr_count(func_a)
         elif column == 12:  # Instr Count B
-            return len(func_b.get('instructions', []))
+            return _instr_count(func_b)
         else:
             return 0
 
@@ -1429,6 +1659,77 @@ class DiffResultsWindow(QMainWindow):
                 f"Failed to navigate to address 0x{address:x}: {str(e)}"
             )
 
+    def transfer_analysis(self):
+        """Transfer selected attributes from matched A functions onto B, over
+        the currently-filtered matches, with a preview/confirm before applying."""
+        if not self.binary_view_a or not self.binary_view_b:
+            QMessageBox.warning(
+                self, "Transfer",
+                "Both Binary A and Binary B views must be open to transfer analysis.")
+            return
+
+        try:
+            import transfer
+        except Exception as e:
+            QMessageBox.critical(self, "Transfer", f"Transfer module unavailable: {e}")
+            return
+
+        options = {
+            transfer.ATTR_NAME: self.transfer_name_checkbox.isChecked(),
+            transfer.ATTR_PROTOTYPE: self.transfer_proto_checkbox.isChecked(),
+            transfer.ATTR_COMMENTS: self.transfer_comments_checkbox.isChecked(),
+            transfer.ATTR_VARIABLES: self.transfer_vars_checkbox.isChecked(),
+        }
+        if not any(options.values()):
+            QMessageBox.information(self, "Transfer", "Select at least one attribute to transfer.")
+            return
+
+        # Scope: selected rows if any are selected, else the whole filtered set.
+        selected_rows = sorted({idx.row() for idx in self.table_view.selectionModel().selectedRows()})
+        if selected_rows:
+            source = [self.filtered_results[r] for r in selected_rows if r < len(self.filtered_results)]
+            scope_desc = f"{len(source)} selected"
+        else:
+            source = self.filtered_results
+            scope_desc = "all filtered"
+
+        # Only matched rows can be transferred.
+        matches = [r for r in source if r.get('function_b', {}).get('address') is not None
+                   and r.get('match_type')]
+        plans = transfer.plan_transfer(self.binary_view_a, self.binary_view_b, matches, options)
+
+        if not plans:
+            QMessageBox.information(
+                self, "Transfer",
+                "No changes to apply — matched functions already agree on the selected attributes.")
+            return
+
+        attr_total = sum(len(p["changes"]) for p in plans)
+        sample = "\n".join(
+            f"  • {p['to']} @ 0x{p['addr_b']:x}: " + ", ".join(c["attr"] for c in p["changes"])
+            for p in plans[:15]
+        )
+        if len(plans) > 15:
+            sample += f"\n  … and {len(plans) - 15} more"
+
+        confirm = QMessageBox.question(
+            self, "Confirm Transfer",
+            f"Apply {attr_total} attribute change(s) across {len(plans)} function(s) "
+            f"in Binary B ({scope_desc})?\nThis is a single undo action.\n\n{sample}",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+
+        summary = transfer.apply_transfer(self.binary_view_b, plans)
+        msg = (f"Transferred {summary['attributes']} attribute(s) across "
+               f"{summary['functions']} function(s).")
+        if summary["errors"]:
+            msg += f"\n\n{len(summary['errors'])} error(s):\n" + "\n".join(summary["errors"][:10])
+            QMessageBox.warning(self, "Transfer Complete (with errors)", msg)
+        else:
+            QMessageBox.information(self, "Transfer Complete", msg)
+        self.status_label.setText(msg.split("\n")[0])
+
     def export_to_csv(self):
         """Export filtered results to CSV"""
         filename, _ = QFileDialog.getSaveFileName(self, "Export to CSV", "", "CSV Files (*.csv)")
@@ -1475,8 +1776,8 @@ class DiffResultsWindow(QMainWindow):
                         func_b.get('size', 0),
                         len(func_a.get('basic_blocks', [])),
                         len(func_b.get('basic_blocks', [])),
-                        len(func_a.get('instructions', [])),
-                        len(func_b.get('instructions', []))
+                        _instr_count(func_a),
+                        _instr_count(func_b)
                     ])
 
             QMessageBox.information(self, "Export Complete", f"Results exported to {filename}")
@@ -1544,8 +1845,8 @@ class DiffResultsWindow(QMainWindow):
                     func_b.get('size', 0),
                     len(func_a.get('basic_blocks', [])),
                     len(func_b.get('basic_blocks', [])),
-                    len(func_a.get('instructions', [])),
-                    len(func_b.get('instructions', []))
+                    _instr_count(func_a),
+                    _instr_count(func_b)
                 ))
 
             conn.commit()
@@ -1658,7 +1959,7 @@ class DiffResultsWindow(QMainWindow):
                     'address': f"0x{self.diff_tab.current_function_a.get('address', 0):x}",
                     'size': self.diff_tab.current_function_a.get('size', 0),
                     'basic_blocks_count': len(self.diff_tab.current_function_a.get('basic_blocks', [])),
-                    'instructions_count': len(self.diff_tab.current_function_a.get('instructions', [])),
+                    'instructions_count': _instr_count(self.diff_tab.current_function_a),
                     'code': text_a
                 },
                 'function_b': {
@@ -1666,7 +1967,7 @@ class DiffResultsWindow(QMainWindow):
                     'address': f"0x{self.diff_tab.current_function_b.get('address', 0):x}",
                     'size': self.diff_tab.current_function_b.get('size', 0),
                     'basic_blocks_count': len(self.diff_tab.current_function_b.get('basic_blocks', [])),
-                    'instructions_count': len(self.diff_tab.current_function_b.get('instructions', [])),
+                    'instructions_count': _instr_count(self.diff_tab.current_function_b),
                     'code': text_b
                 }
             }

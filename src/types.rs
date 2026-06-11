@@ -34,6 +34,10 @@ pub struct FunctionInfo {
     pub cfg_hash: String,
     pub instruction_count: usize,
     pub call_count: usize,
+    /// Addresses of functions this function calls (in its own binary's address space).
+    pub callees: Vec<u64>,
+    /// Addresses of functions that call this function.
+    pub callers: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -62,7 +66,11 @@ pub struct FunctionMatch {
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MatchType {
     Exact,
+    Name,
+    MdIndex,
+    SmallPrimes,
     Structural,
+    CallGraph,
     #[default]
     Heuristic,
     Manual,

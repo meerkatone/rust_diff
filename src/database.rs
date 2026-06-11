@@ -292,9 +292,11 @@ impl DatabaseManager {
             confidence_sum += match_result.confidence;
             
             match match_result.match_type {
-                crate::MatchType::Exact => exact_matches += 1,
-                crate::MatchType::Structural => structural_matches += 1,
-                crate::MatchType::Heuristic => heuristic_matches += 1,
+                crate::MatchType::Exact | crate::MatchType::Name => exact_matches += 1,
+                crate::MatchType::MdIndex
+                | crate::MatchType::SmallPrimes
+                | crate::MatchType::Structural => structural_matches += 1,
+                crate::MatchType::CallGraph | crate::MatchType::Heuristic => heuristic_matches += 1,
                 crate::MatchType::Manual => manual_matches += 1,
             }
         }
