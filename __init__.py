@@ -389,11 +389,12 @@ def refine_matches_with_il(bv_a, bv_b, result, progress=None):
 class BinaryDiffTask(BackgroundTaskThread):
     """Background task: extract features from both binaries and run the Rust engine."""
 
-    def __init__(self, bv1: BinaryView, bv2: BinaryView):
+    def __init__(self, bv1: BinaryView, bv2: BinaryView, on_complete=None):
         super().__init__("Binary Diffing", True)
         self.bv1 = bv1
         self.bv2 = bv2
         self.result = None
+        self.on_complete = on_complete
 
     def _extract_binary_features(self, bv):
         functions = []
@@ -450,6 +451,9 @@ class BinaryDiffTask(BackgroundTaskThread):
                 f"{len(result.get('unmatched_functions_a', []))} unmatched in A, "
                 f"{len(result.get('unmatched_functions_b', []))} unmatched in B"
             )
+
+            if not self.cancelled and self.on_complete is not None:
+                self.on_complete(self.result)
         except Exception as e:
             log_error(f"Error during binary diffing: {e}")
 
@@ -501,28 +505,33 @@ def run_binary_diff(bv):
 
         log_info(f"Starting diff between {bv.file.filename} and {target_bv.file.filename}")
 
-        diff_task = BinaryDiffTask(bv, target_bv)
+        def _on_complete(result):
+            # Runs on the background task thread; do log work here and marshal
+            # any GUI work to the main thread.
+            if not result or not result.get("matched_functions"):
+                log_info("No function matches found")
+                return
+
+            _log_summary(result)
+
+            if HAS_GUI:
+                def _show():
+                    try:
+                        window = show_diff_results(result, bv, target_bv)
+                        if window:
+                            log_info("Qt GUI window opened for detailed results")
+                        else:
+                            log_error("Failed to create Qt GUI window")
+                    except Exception as e:
+                        log_error(f"Failed to show GUI: {e}")
+                bn.execute_on_main_thread(_show)
+            else:
+                log_info("Qt GUI not available. Install PySide6 for enhanced UI features.")
+
+        # Fire-and-forget: the task reports completion via the callback so the
+        # calling (UI) thread is never blocked on join().
+        diff_task = BinaryDiffTask(bv, target_bv, on_complete=_on_complete)
         diff_task.start()
-        diff_task.join()
-
-        result = diff_task.result
-        if not result or not result.get("matched_functions"):
-            log_info("No function matches found")
-            return
-
-        _log_summary(result)
-
-        if HAS_GUI:
-            try:
-                window = show_diff_results(result, bv, target_bv)
-                if window:
-                    log_info("Qt GUI window opened for detailed results")
-                else:
-                    log_error("Failed to create Qt GUI window")
-            except Exception as e:
-                log_error(f"Failed to show GUI: {e}")
-        else:
-            log_info("Qt GUI not available. Install PySide6 for enhanced UI features.")
 
     except Exception as e:
         log_error(f"Error during binary diffing: {e}")
