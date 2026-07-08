@@ -62,6 +62,24 @@ panel.
    python install_pyside.py
    ```
 
+   The build script links against `libbinaryninjacore` from your Binary Ninja
+   install. By default it searches these locations:
+   - macOS: `/Applications/Binary Ninja.app/Contents/MacOS/`, then
+     `/Applications/Binary Ninja Personal Dev/Binary Ninja.app/Contents/MacOS/`
+   - Linux: `/opt/binaryninja/`
+   - Windows: `C:\Program Files\Vector35\BinaryNinja\`
+
+   If your install is elsewhere, or if you intentionally want to build against
+   a dev app bundle, set `BINJA_DIR` to the directory that contains
+   `libbinaryninjacore` before building:
+   ```bash
+   BINJA_DIR="/Applications/Binary Ninja Personal Dev/Binary Ninja.app/Contents/MacOS" cargo build --release
+   ```
+
+   On macOS and Linux, the selected directory is embedded as an rpath in the
+   Rust dylib. Build against the same Binary Ninja install that will load the
+   plugin to avoid core-library version mismatches.
+
 3. Place the whole plugin directory (this repository) in Binary Ninja's
    plugin directory. The Python frontend loads the Rust engine directly from
    `target/release/` inside the plugin folder — no extra copy step is needed:
@@ -69,7 +87,22 @@ panel.
    - Linux: `~/.binaryninja/plugins/rust_diff/`
    - Windows: `%APPDATA%\Binary Ninja\plugins\rust_diff\`
 
-4. Restart Binary Ninja to load the plugin
+   Building in place creates `target/` and Python may create `__pycache__/`;
+   both are ignored by git and can be left in the plugin directory.
+
+4. Restart Binary Ninja to load the plugin.
+
+### Updating or switching Binary Ninja builds
+
+Rebuild the Rust engine after updating Binary Ninja, switching between stable
+and dev builds, or changing `BINJA_DIR`:
+
+```bash
+cargo build --release
+```
+
+If Binary Ninja logs `Failed to load Rust diff engine`, rebuild with the
+correct `BINJA_DIR` and restart Binary Ninja.
 
 ### Verifying the engine
 

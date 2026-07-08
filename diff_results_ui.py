@@ -24,20 +24,17 @@ _ENGINE = None
 
 
 def _engine():
-    """Lazily import the plugin package (which holds the IL extraction / FFI
-    helpers) without a circular import at module load. Returns None if the
-    semantic-diff path is unavailable, so callers fall back to textual diff."""
+    """Find the already-loaded plugin module that holds the IL extraction / FFI
+    helpers. Do not import __init__.py here: Binary Ninja plugin entry modules
+    register commands at import time, so a second import can duplicate side
+    effects. Returns None if unavailable, and callers fall back to text diff."""
     global _ENGINE
     if _ENGINE is not None:
         return _ENGINE
-    for name in ("rust_diff", "__init__"):
-        try:
-            mod = __import__(name)
-            if hasattr(mod, "il_diff") and hasattr(mod, "extract_il_function"):
-                _ENGINE = mod
-                return mod
-        except Exception:
-            continue
+    for mod in list(sys.modules.values()):
+        if hasattr(mod, "il_diff") and hasattr(mod, "extract_il_function"):
+            _ENGINE = mod
+            return mod
     return None
 
 try:
