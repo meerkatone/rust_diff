@@ -1,8 +1,8 @@
+use crate::{BinaryDiffEngine, DiffResult};
+use log::{error, info};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use log::{info, error};
-use crate::{BinaryDiffEngine, DiffResult};
 
 fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     match catch_unwind(AssertUnwindSafe(f)) {

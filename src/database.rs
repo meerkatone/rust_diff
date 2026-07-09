@@ -1,8 +1,8 @@
-use crate::{FunctionInfo, FunctionMatch, DiffResult};
-use anyhow::{Result, Context};
-use serde::{Serialize, Deserialize};
-use std::path::Path;
+use crate::{DiffResult, FunctionInfo, FunctionMatch};
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiffDatabase {
@@ -41,8 +41,10 @@ impl DatabaseManager {
             plugin_version: env!("CARGO_PKG_VERSION").to_string(),
             binary_a_hash: "".to_string(), // TODO: Calculate actual hash
             binary_b_hash: "".to_string(), // TODO: Calculate actual hash
-            total_functions_a: diff_result.matched_functions.len() + diff_result.unmatched_functions_a.len(),
-            total_functions_b: diff_result.matched_functions.len() + diff_result.unmatched_functions_b.len(),
+            total_functions_a: diff_result.matched_functions.len()
+                + diff_result.unmatched_functions_a.len(),
+            total_functions_b: diff_result.matched_functions.len()
+                + diff_result.unmatched_functions_b.len(),
             total_matches: diff_result.matched_functions.len(),
             analysis_time_seconds: 0.0, // TODO: Track actual time
         };
@@ -50,11 +52,15 @@ impl DatabaseManager {
         let database = DiffDatabase {
             binary_a_path: binary_a_path.to_string(),
             binary_b_path: binary_b_path.to_string(),
-            functions_a: diff_result.matched_functions.iter()
+            functions_a: diff_result
+                .matched_functions
+                .iter()
                 .map(|m| m.function_a.clone())
                 .chain(diff_result.unmatched_functions_a.iter().cloned())
                 .collect(),
-            functions_b: diff_result.matched_functions.iter()
+            functions_b: diff_result
+                .matched_functions
+                .iter()
                 .map(|m| m.function_b.clone())
                 .chain(diff_result.unmatched_functions_b.iter().cloned())
                 .collect(),
@@ -62,22 +68,20 @@ impl DatabaseManager {
             metadata,
         };
 
-        let json_data = serde_json::to_string_pretty(&database)
-            .context("Failed to serialize diff results")?;
+        let json_data =
+            serde_json::to_string_pretty(&database).context("Failed to serialize diff results")?;
 
-        fs::write(output_path, json_data)
-            .context("Failed to write database file")?;
+        fs::write(output_path, json_data).context("Failed to write database file")?;
 
         Ok(())
     }
 
     /// Load diff results from a JSON file
     pub fn load_diff_results(input_path: &Path) -> Result<DiffDatabase> {
-        let json_data = fs::read_to_string(input_path)
-            .context("Failed to read database file")?;
+        let json_data = fs::read_to_string(input_path).context("Failed to read database file")?;
 
-        let database: DiffDatabase = serde_json::from_str(&json_data)
-            .context("Failed to deserialize diff results")?;
+        let database: DiffDatabase =
+            serde_json::from_str(&json_data).context("Failed to deserialize diff results")?;
 
         Ok(database)
     }
@@ -85,10 +89,10 @@ impl DatabaseManager {
     /// Export results to CSV format
     pub fn export_to_csv(database: &DiffDatabase, output_path: &Path) -> Result<()> {
         let mut csv_content = String::new();
-        
+
         // CSV header
         csv_content.push_str("Function A,Address A,Function B,Address B,Similarity,Confidence,Match Type,Size A,Size B,BB Count A,BB Count B,Instr Count A,Instr Count B\n");
-        
+
         // Add matched functions
         for match_result in &database.matches {
             csv_content.push_str(&format!(
@@ -108,10 +112,9 @@ impl DatabaseManager {
                 match_result.function_b.instructions.len()
             ));
         }
-        
-        fs::write(output_path, csv_content)
-            .context("Failed to write CSV file")?;
-        
+
+        fs::write(output_path, csv_content).context("Failed to write CSV file")?;
+
         Ok(())
     }
 
@@ -120,7 +123,7 @@ impl DatabaseManager {
     /// Does not open a SQLite database itself.
     pub fn export_to_sql_script(database: &DiffDatabase, output_path: &Path) -> Result<()> {
         let mut sql_content = String::new();
-        
+
         // Create table
         sql_content.push_str("CREATE TABLE IF NOT EXISTS function_matches (\n");
         sql_content.push_str("    id INTEGER PRIMARY KEY AUTOINCREMENT,\n");
@@ -139,7 +142,7 @@ impl DatabaseManager {
         sql_content.push_str("    instr_count_b INTEGER,\n");
         sql_content.push_str("    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n");
         sql_content.push_str(");\n\n");
-        
+
         // Insert data
         for match_result in &database.matches {
             sql_content.push_str(&format!(
@@ -159,10 +162,9 @@ impl DatabaseManager {
                 match_result.function_b.instructions.len()
             ));
         }
-        
-        fs::write(output_path, sql_content)
-            .context("Failed to write SQL file")?;
-        
+
+        fs::write(output_path, sql_content).context("Failed to write SQL file")?;
+
         Ok(())
     }
 
@@ -234,8 +236,7 @@ impl DatabaseManager {
             Self::generate_html_table_rows(&database.matches)
         );
 
-        fs::write(output_path, html_content)
-            .context("Failed to write HTML file")?;
+        fs::write(output_path, html_content).context("Failed to write HTML file")?;
 
         Ok(())
     }
@@ -243,7 +244,7 @@ impl DatabaseManager {
     /// Generate HTML table rows for matches
     fn generate_html_table_rows(matches: &[FunctionMatch]) -> String {
         let mut rows = String::new();
-        
+
         for match_result in matches {
             let class = if match_result.confidence >= 0.67 {
                 "high-confidence"
@@ -252,7 +253,7 @@ impl DatabaseManager {
             } else {
                 "low-confidence"
             };
-            
+
             rows.push_str(&format!(
                 r#"<tr class="{}">
                     <td>{}</td>
@@ -273,7 +274,7 @@ impl DatabaseManager {
                 match_result.match_type
             ));
         }
-        
+
         rows
     }
 
@@ -283,14 +284,14 @@ impl DatabaseManager {
         let mut structural_matches = 0;
         let mut heuristic_matches = 0;
         let mut manual_matches = 0;
-        
+
         let mut similarity_sum = 0.0;
         let mut confidence_sum = 0.0;
-        
+
         for match_result in &database.matches {
             similarity_sum += match_result.similarity;
             confidence_sum += match_result.confidence;
-            
+
             match match_result.match_type {
                 crate::MatchType::Exact | crate::MatchType::Name => exact_matches += 1,
                 crate::MatchType::MdIndex
@@ -300,20 +301,20 @@ impl DatabaseManager {
                 crate::MatchType::Manual => manual_matches += 1,
             }
         }
-        
+
         let total_matches = database.matches.len();
         let average_similarity = if total_matches > 0 {
             similarity_sum / total_matches as f64
         } else {
             0.0
         };
-        
+
         let average_confidence = if total_matches > 0 {
             confidence_sum / total_matches as f64
         } else {
             0.0
         };
-        
+
         DiffStatistics {
             total_matches,
             exact_matches,

@@ -1,16 +1,20 @@
-use crate::types::{FunctionInfo, MatchDetails, MatchType};
 use crate::similarity::SimilarityAnalyzer;
-use std::collections::HashMap;
+use crate::types::{FunctionInfo, MatchDetails, MatchType};
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use sha2::{Sha256, Digest};
 
 pub struct DiffAlgorithms;
 
 /// Clamp a score to [0.0, 1.0] and replace NaN with 0.0.
 #[inline]
 fn sanitize_score(x: f64) -> f64 {
-    if x.is_nan() { 0.0 } else { x.clamp(0.0, 1.0) }
+    if x.is_nan() {
+        0.0
+    } else {
+        x.clamp(0.0, 1.0)
+    }
 }
 
 /// Deterministic (unseeded) hash of any hashable value.
@@ -24,9 +28,14 @@ fn stable_hash<T: Hash>(value: &T) -> u64 {
 /// True for call-like mnemonics across common architectures.
 fn is_call_mnemonic(m: &str) -> bool {
     let m = m.trim();
-    m == "call" || m == "callq" || m == "calll"
-        || m == "bl" || m == "blx" || m == "blr"
-        || m == "jal" || m == "jalr"
+    m == "call"
+        || m == "callq"
+        || m == "calll"
+        || m == "bl"
+        || m == "blx"
+        || m == "blr"
+        || m == "jal"
+        || m == "jalr"
 }
 
 /// True for return-like mnemonics across common architectures.
@@ -38,13 +47,21 @@ fn is_return_mnemonic(m: &str) -> bool {
 impl DiffAlgorithms {
     /// Calculate similarity between two functions using multiple metrics
     /// and return both the weighted score and detailed per-metric breakdown.
-    pub fn compute_match_details(func_a: &FunctionInfo, func_b: &FunctionInfo) -> (f64, MatchDetails) {
+    pub fn compute_match_details(
+        func_a: &FunctionInfo,
+        func_b: &FunctionInfo,
+    ) -> (f64, MatchDetails) {
         let cfg_similarity = sanitize_score(Self::calculate_cfg_similarity(func_a, func_b));
         let bb_similarity = sanitize_score(Self::calculate_basic_block_similarity(func_a, func_b));
-        let instruction_similarity = sanitize_score(Self::calculate_instruction_similarity(func_a, func_b));
+        let instruction_similarity =
+            sanitize_score(Self::calculate_instruction_similarity(func_a, func_b));
         let edge_similarity = sanitize_score(Self::calculate_edge_similarity(func_a, func_b));
-        let name_similarity = sanitize_score(SimilarityAnalyzer::normalized_edit_distance(&func_a.name, &func_b.name));
-        let call_similarity = sanitize_score(SimilarityAnalyzer::function_call_similarity(func_a, func_b));
+        let name_similarity = sanitize_score(SimilarityAnalyzer::normalized_edit_distance(
+            &func_a.name,
+            &func_b.name,
+        ));
+        let call_similarity =
+            sanitize_score(SimilarityAnalyzer::function_call_similarity(func_a, func_b));
 
         let weighted_similarity = sanitize_score(
             cfg_similarity * 0.30
@@ -223,7 +240,10 @@ impl DiffAlgorithms {
             .enumerate()
             .map(|(i, bb)| {
                 let degree_class = succs[i].len().min(3) as u64;
-                let has_call = bb.instructions.iter().any(|ins| is_call_mnemonic(&ins.mnemonic));
+                let has_call = bb
+                    .instructions
+                    .iter()
+                    .any(|ins| is_call_mnemonic(&ins.mnemonic));
                 let has_ret = bb
                     .instructions
                     .last()
@@ -375,7 +395,11 @@ impl DiffAlgorithms {
         let mut primes: Vec<u64> = Vec::with_capacity(n);
         let mut candidate = 2u64;
         while primes.len() < n {
-            if primes.iter().take_while(|&&p| p * p <= candidate).all(|&p| candidate % p != 0) {
+            if primes
+                .iter()
+                .take_while(|&&p| p * p <= candidate)
+                .all(|&p| candidate % p != 0)
+            {
                 primes.push(candidate);
             }
             candidate += 1;

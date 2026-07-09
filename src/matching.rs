@@ -1,9 +1,9 @@
-use crate::types::{FunctionInfo, FunctionMatch, MatchType, MatchDetails};
 use crate::algorithms::DiffAlgorithms;
 use crate::similarity::SimilarityAnalyzer;
+use crate::types::{FunctionInfo, FunctionMatch, MatchDetails, MatchType};
 use anyhow::Result;
-use rustc_hash::{FxHashMap, FxHashSet};
 use rayon::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 
 /// Deterministic tie-breaker: higher similarity wins; then lower index_b
@@ -95,10 +95,14 @@ impl MatchingEngine {
 
         // Precompute per-function keys once instead of per-pair.
         let prime_table = DiffAlgorithms::build_mnemonic_prime_table(functions_a, functions_b);
-        let md_a: Vec<Option<String>> =
-            functions_a.iter().map(|f| Some(DiffAlgorithms::calculate_md_index(f))).collect();
-        let md_b: Vec<Option<String>> =
-            functions_b.iter().map(|f| Some(DiffAlgorithms::calculate_md_index(f))).collect();
+        let md_a: Vec<Option<String>> = functions_a
+            .iter()
+            .map(|f| Some(DiffAlgorithms::calculate_md_index(f)))
+            .collect();
+        let md_b: Vec<Option<String>> = functions_b
+            .iter()
+            .map(|f| Some(DiffAlgorithms::calculate_md_index(f)))
+            .collect();
         let spp_key = |f: &FunctionInfo| {
             (f.instructions.len() >= MIN_SPP_INSTRUCTIONS)
                 .then(|| DiffAlgorithms::calculate_small_primes_product(f, &prime_table))
@@ -110,31 +114,61 @@ impl MatchingEngine {
         //    content hash. Structure alone is not enough for "exact" — small
         //    leaf functions with different instructions share WL hashes.
         let exact_key = |f: &FunctionInfo| {
-            Some((DiffAlgorithms::calculate_fuzzy_hash(f), f.cfg_hash.clone(), f.call_graph_hash.clone()))
+            Some((
+                DiffAlgorithms::calculate_fuzzy_hash(f),
+                f.cfg_hash.clone(),
+                f.call_graph_hash.clone(),
+            ))
         };
-        let exact_a: Vec<Option<(String, String, String)>> = functions_a.iter().map(exact_key).collect();
-        let exact_b: Vec<Option<(String, String, String)>> = functions_b.iter().map(exact_key).collect();
+        let exact_a: Vec<Option<(String, String, String)>> =
+            functions_a.iter().map(exact_key).collect();
+        let exact_b: Vec<Option<(String, String, String)>> =
+            functions_b.iter().map(exact_key).collect();
         self.keyed_matching(
-            functions_a, functions_b, &exact_a, &exact_b,
-            MatchType::Exact, 0.0,
-            &mut matches, &mut used_a, &mut used_b,
+            functions_a,
+            functions_b,
+            &exact_a,
+            &exact_b,
+            MatchType::Exact,
+            0.0,
+            &mut matches,
+            &mut used_a,
+            &mut used_b,
         );
 
         // 2. Symbol name matching (near ground truth for real symbols)
-        self.name_matching(functions_a, functions_b, &mut matches, &mut used_a, &mut used_b)?;
+        self.name_matching(
+            functions_a,
+            functions_b,
+            &mut matches,
+            &mut used_a,
+            &mut used_b,
+        )?;
 
         // 3. MD-Index matching (topological fingerprint)
         self.keyed_matching(
-            functions_a, functions_b, &md_a, &md_b,
-            MatchType::MdIndex, self.similarity_threshold,
-            &mut matches, &mut used_a, &mut used_b,
+            functions_a,
+            functions_b,
+            &md_a,
+            &md_b,
+            MatchType::MdIndex,
+            self.similarity_threshold,
+            &mut matches,
+            &mut used_a,
+            &mut used_b,
         );
 
         // 4. Small primes product matching (order-independent instruction multiset)
         self.keyed_matching(
-            functions_a, functions_b, &spp_a, &spp_b,
-            MatchType::SmallPrimes, self.similarity_threshold,
-            &mut matches, &mut used_a, &mut used_b,
+            functions_a,
+            functions_b,
+            &spp_a,
+            &spp_b,
+            MatchType::SmallPrimes,
+            self.similarity_threshold,
+            &mut matches,
+            &mut used_a,
+            &mut used_b,
         );
 
         // 5. Structural matching (WL hash equality; instructions may differ
@@ -147,17 +181,35 @@ impl MatchingEngine {
         let wl_a: Vec<Option<&str>> = functions_a.iter().map(wl_key).collect();
         let wl_b: Vec<Option<&str>> = functions_b.iter().map(wl_key).collect();
         self.keyed_matching(
-            functions_a, functions_b, &wl_a, &wl_b,
-            MatchType::Structural, (self.similarity_threshold - 0.2).max(0.3),
-            &mut matches, &mut used_a, &mut used_b,
+            functions_a,
+            functions_b,
+            &wl_a,
+            &wl_b,
+            MatchType::Structural,
+            (self.similarity_threshold - 0.2).max(0.3),
+            &mut matches,
+            &mut used_a,
+            &mut used_b,
         );
 
         // 6. Call-graph match propagation (BinDiff "drill-down"): grow matches
         //    outward from existing anchors through callers/callees.
-        self.call_graph_propagation(functions_a, functions_b, &mut matches, &mut used_a, &mut used_b);
+        self.call_graph_propagation(
+            functions_a,
+            functions_b,
+            &mut matches,
+            &mut used_a,
+            &mut used_b,
+        );
 
         // 7. Fuzzy matching for whatever survives propagation
-        self.fuzzy_matching(functions_a, functions_b, &mut matches, &mut used_a, &mut used_b)?;
+        self.fuzzy_matching(
+            functions_a,
+            functions_b,
+            &mut matches,
+            &mut used_a,
+            &mut used_b,
+        )?;
 
         Ok(matches)
     }
@@ -194,7 +246,9 @@ impl MatchingEngine {
                         let (similarity, details) =
                             DiffAlgorithms::compute_match_details(func_a, &functions_b[idx]);
                         if similarity >= NAME_SIMILARITY_FLOOR
-                            && best.as_ref().map_or(true, |(bi, bs, _)| better_candidate(similarity, idx, *bs, *bi))
+                            && best.as_ref().map_or(true, |(bi, bs, _)| {
+                                better_candidate(similarity, idx, *bs, *bi)
+                            })
                         {
                             best = Some((idx, similarity, details));
                         }
@@ -202,8 +256,16 @@ impl MatchingEngine {
                 }
                 if let Some((idx, similarity, details)) = best {
                     Self::push_match(
-                        matches, used_a, used_b, functions_a, functions_b,
-                        idx_a, idx, similarity, details, MatchType::Name,
+                        matches,
+                        used_a,
+                        used_b,
+                        functions_a,
+                        functions_b,
+                        idx_a,
+                        idx,
+                        similarity,
+                        details,
+                        MatchType::Name,
                     );
                 }
             }
@@ -242,7 +304,9 @@ impl MatchingEngine {
             if used_a.contains(&idx_a) {
                 continue;
             }
-            let Some(key_a) = &keys_a[idx_a] else { continue };
+            let Some(key_a) = &keys_a[idx_a] else {
+                continue;
+            };
             if let Some(candidates) = key_map_b.get(key_a) {
                 let mut best: Option<(usize, f64, MatchDetails)> = None;
                 for &idx in candidates {
@@ -250,7 +314,9 @@ impl MatchingEngine {
                         let (similarity, details) =
                             DiffAlgorithms::compute_match_details(func_a, &functions_b[idx]);
                         if similarity >= min_similarity
-                            && best.as_ref().map_or(true, |(bi, bs, _)| better_candidate(similarity, idx, *bs, *bi))
+                            && best.as_ref().map_or(true, |(bi, bs, _)| {
+                                better_candidate(similarity, idx, *bs, *bi)
+                            })
                         {
                             best = Some((idx, similarity, details));
                         }
@@ -258,8 +324,16 @@ impl MatchingEngine {
                 }
                 if let Some((idx, similarity, details)) = best {
                     Self::push_match(
-                        matches, used_a, used_b, functions_a, functions_b,
-                        idx_a, idx, similarity, details, match_type.clone(),
+                        matches,
+                        used_a,
+                        used_b,
+                        functions_a,
+                        functions_b,
+                        idx_a,
+                        idx,
+                        similarity,
+                        details,
+                        match_type.clone(),
                     );
                 }
             }
@@ -282,10 +356,16 @@ impl MatchingEngine {
     ) {
         let relaxed_threshold = (self.similarity_threshold - 0.25).max(0.35);
 
-        let addr_to_idx_a: FxHashMap<u64, usize> =
-            functions_a.iter().enumerate().map(|(i, f)| (f.address, i)).collect();
-        let addr_to_idx_b: FxHashMap<u64, usize> =
-            functions_b.iter().enumerate().map(|(i, f)| (f.address, i)).collect();
+        let addr_to_idx_a: FxHashMap<u64, usize> = functions_a
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.address, i))
+            .collect();
+        let addr_to_idx_b: FxHashMap<u64, usize> = functions_b
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.address, i))
+            .collect();
 
         let mut worklist: VecDeque<(usize, usize)> = matches
             .iter()
@@ -300,8 +380,14 @@ impl MatchingEngine {
         while let Some((anchor_a, anchor_b)) = worklist.pop_front() {
             // Two neighborhoods: callees of the anchors, then callers.
             let neighborhoods = [
-                (&functions_a[anchor_a].callees, &functions_b[anchor_b].callees),
-                (&functions_a[anchor_a].callers, &functions_b[anchor_b].callers),
+                (
+                    &functions_a[anchor_a].callees,
+                    &functions_b[anchor_b].callees,
+                ),
+                (
+                    &functions_a[anchor_a].callers,
+                    &functions_b[anchor_b].callers,
+                ),
             ];
 
             for (neighbors_a, neighbors_b) in neighborhoods {
@@ -325,8 +411,10 @@ impl MatchingEngine {
                 let mut scored: Vec<(usize, usize, f64, MatchDetails)> = Vec::new();
                 for &ia in &cand_a {
                     for &ib in &cand_b {
-                        let (similarity, details) =
-                            DiffAlgorithms::compute_match_details(&functions_a[ia], &functions_b[ib]);
+                        let (similarity, details) = DiffAlgorithms::compute_match_details(
+                            &functions_a[ia],
+                            &functions_b[ib],
+                        );
                         if similarity >= relaxed_threshold {
                             scored.push((ia, ib, similarity, details));
                         }
@@ -341,8 +429,16 @@ impl MatchingEngine {
                 for (ia, ib, similarity, details) in scored {
                     if !used_a.contains(&ia) && !used_b.contains(&ib) {
                         Self::push_match(
-                            matches, used_a, used_b, functions_a, functions_b,
-                            ia, ib, similarity, details, MatchType::CallGraph,
+                            matches,
+                            used_a,
+                            used_b,
+                            functions_a,
+                            functions_b,
+                            ia,
+                            ib,
+                            similarity,
+                            details,
+                            MatchType::CallGraph,
                         );
                         worklist.push_back((ia, ib));
                     }
@@ -382,7 +478,8 @@ impl MatchingEngine {
                     }
 
                     let (primary, details) = DiffAlgorithms::compute_match_details(func_a, func_b);
-                    let comprehensive = SimilarityAnalyzer::comprehensive_similarity(func_a, func_b);
+                    let comprehensive =
+                        SimilarityAnalyzer::comprehensive_similarity(func_a, func_b);
                     let similarity = (primary * 0.6 + comprehensive * 0.4).clamp(0.0, 1.0);
                     let confidence =
                         DiffAlgorithms::confidence_for_match(&MatchType::Heuristic, similarity);
@@ -404,14 +501,20 @@ impl MatchingEngine {
 
         // Deterministic conflict resolution: prefer higher similarity, then
         // lowest idx_a for stable tie-breaking.
-        candidates.sort_by(|a, b| {
-            b.2.total_cmp(&a.2).then_with(|| a.0.cmp(&b.0))
-        });
+        candidates.sort_by(|a, b| b.2.total_cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
         for (idx_a, idx_b, similarity, details) in candidates {
             if !used_a.contains(&idx_a) && !used_b.contains(&idx_b) {
                 Self::push_match(
-                    matches, used_a, used_b, functions_a, functions_b,
-                    idx_a, idx_b, similarity, details, MatchType::Heuristic,
+                    matches,
+                    used_a,
+                    used_b,
+                    functions_a,
+                    functions_b,
+                    idx_a,
+                    idx_b,
+                    similarity,
+                    details,
+                    MatchType::Heuristic,
                 );
             }
         }

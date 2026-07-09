@@ -1,7 +1,7 @@
-use crate::{FunctionInfo, BasicBlockInfo, InstructionInfo};
-use std::collections::HashMap;
-use rustc_hash::FxHashSet;
+use crate::{BasicBlockInfo, FunctionInfo, InstructionInfo};
 use petgraph::Graph;
+use rustc_hash::FxHashSet;
+use std::collections::HashMap;
 
 pub struct SimilarityAnalyzer;
 
@@ -10,7 +10,7 @@ impl SimilarityAnalyzer {
     pub fn jaccard_similarity(set_a: &FxHashSet<String>, set_b: &FxHashSet<String>) -> f64 {
         let intersection = set_a.intersection(set_b).count();
         let union = set_a.union(set_b).count();
-        
+
         if union == 0 {
             1.0 // Both sets are empty
         } else {
@@ -19,11 +19,14 @@ impl SimilarityAnalyzer {
     }
 
     /// Calculate cosine similarity between two frequency vectors
-    pub fn cosine_similarity(freq_a: &HashMap<String, usize>, freq_b: &HashMap<String, usize>) -> f64 {
+    pub fn cosine_similarity(
+        freq_a: &HashMap<String, usize>,
+        freq_b: &HashMap<String, usize>,
+    ) -> f64 {
         let mut dot_product = 0.0;
         let mut norm_a = 0.0;
         let mut norm_b = 0.0;
-        
+
         // Calculate dot product and norms
         for (key, &count_a) in freq_a {
             norm_a += (count_a as f64).powi(2);
@@ -31,15 +34,15 @@ impl SimilarityAnalyzer {
                 dot_product += (count_a as f64) * (count_b as f64);
             }
         }
-        
+
         for &count_b in freq_b.values() {
             norm_b += (count_b as f64).powi(2);
         }
-        
+
         if norm_a == 0.0 || norm_b == 0.0 {
             return 0.0;
         }
-        
+
         dot_product / (norm_a.sqrt() * norm_b.sqrt())
     }
 
@@ -74,30 +77,37 @@ impl SimilarityAnalyzer {
         if max_len == 0 {
             return 1.0;
         }
-        
+
         let edit_dist = Self::edit_distance(s1, s2);
         1.0 - (edit_dist as f64 / max_len as f64)
     }
 
     /// Calculate mnemonic similarity between two basic blocks
     pub fn basic_block_mnemonic_similarity(bb_a: &BasicBlockInfo, bb_b: &BasicBlockInfo) -> f64 {
-        let mnemonics_a: FxHashSet<String> = bb_a.instructions.iter()
+        let mnemonics_a: FxHashSet<String> = bb_a
+            .instructions
+            .iter()
             .map(|instr| instr.mnemonic.clone())
             .collect();
-        
-        let mnemonics_b: FxHashSet<String> = bb_b.instructions.iter()
+
+        let mnemonics_b: FxHashSet<String> = bb_b
+            .instructions
+            .iter()
             .map(|instr| instr.mnemonic.clone())
             .collect();
-        
+
         Self::jaccard_similarity(&mnemonics_a, &mnemonics_b)
     }
 
     /// Calculate instruction sequence similarity
-    pub fn instruction_sequence_similarity(instrs_a: &[InstructionInfo], instrs_b: &[InstructionInfo]) -> f64 {
+    pub fn instruction_sequence_similarity(
+        instrs_a: &[InstructionInfo],
+        instrs_b: &[InstructionInfo],
+    ) -> f64 {
         if instrs_a.is_empty() && instrs_b.is_empty() {
             return 1.0;
         }
-        
+
         if instrs_a.is_empty() || instrs_b.is_empty() {
             return 0.0;
         }
@@ -106,8 +116,16 @@ impl SimilarityAnalyzer {
         // not per character), capped so huge functions don't blow up the
         // O(n*m) DP inside the pairwise fuzzy phase.
         const MAX_TOKENS: usize = 512;
-        let seq_a: Vec<&str> = instrs_a.iter().take(MAX_TOKENS).map(|i| i.mnemonic.as_str()).collect();
-        let seq_b: Vec<&str> = instrs_b.iter().take(MAX_TOKENS).map(|i| i.mnemonic.as_str()).collect();
+        let seq_a: Vec<&str> = instrs_a
+            .iter()
+            .take(MAX_TOKENS)
+            .map(|i| i.mnemonic.as_str())
+            .collect();
+        let seq_b: Vec<&str> = instrs_b
+            .iter()
+            .take(MAX_TOKENS)
+            .map(|i| i.mnemonic.as_str())
+            .collect();
 
         let mut prev: Vec<usize> = (0..=seq_b.len()).collect();
         let mut curr = vec![0usize; seq_b.len() + 1];
@@ -132,7 +150,7 @@ impl SimilarityAnalyzer {
         // Create adjacency lists for both functions
         let graph_a = Self::build_cfg_graph(func_a);
         let graph_b = Self::build_cfg_graph(func_b);
-        
+
         // Compare graph structures
         Self::graph_similarity(&graph_a, &graph_b)
     }
@@ -141,13 +159,13 @@ impl SimilarityAnalyzer {
     fn build_cfg_graph(func: &FunctionInfo) -> Graph<u64, ()> {
         let mut graph = Graph::new();
         let mut node_map = HashMap::new();
-        
+
         // Add nodes for each basic block
         for bb in &func.basic_blocks {
             let node_idx = graph.add_node(bb.address);
             node_map.insert(bb.address, node_idx);
         }
-        
+
         // Add edges
         for bb in &func.basic_blocks {
             if let Some(&from_idx) = node_map.get(&bb.address) {
@@ -158,7 +176,7 @@ impl SimilarityAnalyzer {
                 }
             }
         }
-        
+
         graph
     }
 
@@ -168,18 +186,18 @@ impl SimilarityAnalyzer {
         let nodes_b = graph_b.node_count();
         let edges_a = graph_a.edge_count();
         let edges_b = graph_b.edge_count();
-        
+
         if nodes_a == 0 && nodes_b == 0 {
             return 1.0;
         }
-        
+
         // Simple structural similarity
         let node_similarity = if nodes_a == 0 || nodes_b == 0 {
             0.0
         } else {
             1.0 - ((nodes_a as f64 - nodes_b as f64).abs() / nodes_a.max(nodes_b) as f64)
         };
-        
+
         let edge_similarity = if edges_a == 0 && edges_b == 0 {
             1.0
         } else if edges_a == 0 || edges_b == 0 {
@@ -187,7 +205,7 @@ impl SimilarityAnalyzer {
         } else {
             1.0 - ((edges_a as f64 - edges_b as f64).abs() / edges_a.max(edges_b) as f64)
         };
-        
+
         // Weighted combination
         0.6 * node_similarity + 0.4 * edge_similarity
     }
@@ -197,14 +215,14 @@ impl SimilarityAnalyzer {
         // Extract function calls from instructions
         let calls_a = Self::extract_function_calls(func_a);
         let calls_b = Self::extract_function_calls(func_b);
-        
+
         Self::jaccard_similarity(&calls_a, &calls_b)
     }
 
     /// Extract function calls from instructions
     fn extract_function_calls(func: &FunctionInfo) -> FxHashSet<String> {
         let mut calls = FxHashSet::default();
-        
+
         for instr in &func.instructions {
             // Look for call instructions
             if instr.mnemonic.to_lowercase().contains("call") {
@@ -214,7 +232,7 @@ impl SimilarityAnalyzer {
                 }
             }
         }
-        
+
         calls
     }
 
@@ -222,14 +240,14 @@ impl SimilarityAnalyzer {
     pub fn constant_similarity(func_a: &FunctionInfo, func_b: &FunctionInfo) -> f64 {
         let constants_a = Self::extract_constants(func_a);
         let constants_b = Self::extract_constants(func_b);
-        
+
         Self::jaccard_similarity(&constants_a, &constants_b)
     }
 
     /// Extract constants from function instructions
     fn extract_constants(func: &FunctionInfo) -> FxHashSet<String> {
         let mut constants = FxHashSet::default();
-        
+
         for instr in &func.instructions {
             for operand in &instr.operands {
                 // Only keep small immediates: large values are almost always
@@ -256,14 +274,14 @@ impl SimilarityAnalyzer {
     pub fn string_similarity(func_a: &FunctionInfo, func_b: &FunctionInfo) -> f64 {
         let strings_a = Self::extract_strings(func_a);
         let strings_b = Self::extract_strings(func_b);
-        
+
         Self::jaccard_similarity(&strings_a, &strings_b)
     }
 
     /// Extract string references from function instructions
     fn extract_strings(func: &FunctionInfo) -> FxHashSet<String> {
         let mut strings = FxHashSet::default();
-        
+
         for instr in &func.instructions {
             for operand in &instr.operands {
                 // Look for string references (this is a simplified check)
@@ -272,7 +290,7 @@ impl SimilarityAnalyzer {
                 }
             }
         }
-        
+
         strings
     }
 
@@ -283,17 +301,20 @@ impl SimilarityAnalyzer {
             (Self::function_call_similarity(func_a, func_b), 0.2),
             (Self::constant_similarity(func_a, func_b), 0.2),
             (Self::string_similarity(func_a, func_b), 0.1),
-            (Self::instruction_sequence_similarity(&func_a.instructions, &func_b.instructions), 0.2),
+            (
+                Self::instruction_sequence_similarity(&func_a.instructions, &func_b.instructions),
+                0.2,
+            ),
         ];
-        
+
         let mut total_weighted_score = 0.0;
         let mut total_weight = 0.0;
-        
+
         for (score, weight) in weights {
             total_weighted_score += score * weight;
             total_weight += weight;
         }
-        
+
         if total_weight > 0.0 {
             total_weighted_score / total_weight
         } else {
@@ -302,9 +323,12 @@ impl SimilarityAnalyzer {
     }
 
     /// Calculate basic block similarity matrix
-    pub fn basic_block_similarity_matrix(func_a: &FunctionInfo, func_b: &FunctionInfo) -> Vec<Vec<f64>> {
+    pub fn basic_block_similarity_matrix(
+        func_a: &FunctionInfo,
+        func_b: &FunctionInfo,
+    ) -> Vec<Vec<f64>> {
         let mut matrix = Vec::new();
-        
+
         for bb_a in &func_a.basic_blocks {
             let mut row = Vec::new();
             for bb_b in &func_b.basic_blocks {
@@ -313,7 +337,7 @@ impl SimilarityAnalyzer {
             }
             matrix.push(row);
         }
-        
+
         matrix
     }
 }

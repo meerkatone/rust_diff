@@ -1,21 +1,21 @@
+use anyhow::{Context, Result};
+use log::info;
 use std::collections::HashSet;
 use std::time::Instant;
-use anyhow::{Result, Context};
-use log::info;
 
-pub mod types;
 pub mod algorithms;
-pub mod similarity;
-pub mod matching;
+pub mod block;
 pub mod database;
-pub mod ui;
 pub mod ffi;
 pub mod il;
-pub mod block;
+pub mod matching;
+pub mod similarity;
+pub mod types;
+pub mod ui;
 
-pub use types::*;
 pub use algorithms::*;
 pub use similarity::*;
+pub use types::*;
 
 pub struct BinaryDiffEngine {
     pub similarity_threshold: f64,
@@ -162,8 +162,7 @@ impl BinaryDiffEngine {
         let json_data = serde_json::to_string_pretty(diff_result)
             .context("Failed to serialize diff results")?;
 
-        std::fs::write(output_path, json_data)
-            .context("Failed to write results file")?;
+        std::fs::write(output_path, json_data).context("Failed to write results file")?;
 
         info!("Results saved to {}", output_path);
         Ok(())

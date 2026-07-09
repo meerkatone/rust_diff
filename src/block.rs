@@ -239,8 +239,14 @@ pub fn block_diff(req: &BlockDiffRequest) -> BlockDiff {
 
     // 1a. Entry blocks always correspond (a function relates to its entry by
     // definition; the pair's *status* still reflects how much it changed).
-    let entry_a = req.a.entry.or_else(|| req.a.blocks.first().map(|b| b.index));
-    let entry_b = req.b.entry.or_else(|| req.b.blocks.first().map(|b| b.index));
+    let entry_a = req
+        .a
+        .entry
+        .or_else(|| req.a.blocks.first().map(|b| b.index));
+    let entry_b = req
+        .b
+        .entry
+        .or_else(|| req.b.blocks.first().map(|b| b.index));
     if let (Some(ea), Some(eb)) = (entry_a, entry_b) {
         if prep_a.contains_key(&ea) && prep_b.contains_key(&eb) {
             matched_a.insert(ea);
@@ -336,13 +342,30 @@ pub fn block_diff(req: &BlockDiffRequest) -> BlockDiff {
         .iter()
         .map(|&(a, b, sim)| {
             let status = status_of(&prep_a[&a], &prep_b[&b]);
-            let similarity = if status == BlockStatus::Changed { sim } else { 1.0 };
-            BlockPair { a, b, status, similarity }
+            let similarity = if status == BlockStatus::Changed {
+                sim
+            } else {
+                1.0
+            };
+            BlockPair {
+                a,
+                b,
+                status,
+                similarity,
+            }
         })
         .collect();
 
-    let only_a: Vec<usize> = ids_a.iter().copied().filter(|i| !matched_a.contains(i)).collect();
-    let only_b: Vec<usize> = ids_b.iter().copied().filter(|i| !matched_b.contains(i)).collect();
+    let only_a: Vec<usize> = ids_a
+        .iter()
+        .copied()
+        .filter(|i| !matched_a.contains(i))
+        .collect();
+    let only_b: Vec<usize> = ids_b
+        .iter()
+        .copied()
+        .filter(|i| !matched_b.contains(i))
+        .collect();
 
     let denom = ids_a.len().max(ids_b.len());
     let similarity = if denom == 0 {
@@ -351,7 +374,12 @@ pub fn block_diff(req: &BlockDiffRequest) -> BlockDiff {
         out_pairs.iter().map(|p| p.similarity).sum::<f64>() / denom as f64
     };
 
-    BlockDiff { pairs: out_pairs, only_a, only_b, similarity }
+    BlockDiff {
+        pairs: out_pairs,
+        only_a,
+        only_b,
+        similarity,
+    }
 }
 
 #[cfg(test)]
@@ -360,23 +388,44 @@ mod tests {
     use crate::il::IlToken;
 
     fn tok(kind: &str, text: &str) -> IlToken {
-        IlToken { kind: kind.to_string(), text: text.to_string() }
+        IlToken {
+            kind: kind.to_string(),
+            text: text.to_string(),
+        }
     }
     fn line(tokens: Vec<IlToken>, text: &str) -> IlLine {
-        IlLine { tokens, text: text.to_string() }
+        IlLine {
+            tokens,
+            text: text.to_string(),
+        }
     }
     fn tline(text: &str) -> IlLine {
         // Untyped line: canonicalizes to its whitespace-normalized text.
-        IlLine { tokens: Vec::new(), text: text.to_string() }
+        IlLine {
+            tokens: Vec::new(),
+            text: text.to_string(),
+        }
     }
     fn block(index: usize, lines: Vec<IlLine>, successors: Vec<usize>) -> BlockInfo {
-        BlockInfo { index, lines, successors }
+        BlockInfo {
+            index,
+            lines,
+            successors,
+        }
     }
     fn func(blocks: Vec<BlockInfo>) -> BlockFunction {
-        BlockFunction { level: "HLIL".into(), blocks, entry: None }
+        BlockFunction {
+            level: "HLIL".into(),
+            blocks,
+            entry: None,
+        }
     }
     fn req(a: BlockFunction, b: BlockFunction) -> BlockDiffRequest {
-        BlockDiffRequest { a, b, ..Default::default() }
+        BlockDiffRequest {
+            a,
+            b,
+            ..Default::default()
+        }
     }
 
     fn pair_of(d: &BlockDiff, a: usize) -> &BlockPair {
@@ -387,7 +436,11 @@ mod tests {
     fn identical_functions_match_fully_equal() {
         let mk = || {
             func(vec![
-                block(0, vec![tline("x = arg1"), tline("if (x > 5) goto 1 else 2")], vec![1, 2]),
+                block(
+                    0,
+                    vec![tline("x = arg1"), tline("if (x > 5) goto 1 else 2")],
+                    vec![1, 2],
+                ),
                 block(1, vec![tline("return 1")], vec![]),
                 block(2, vec![tline("return 0")], vec![]),
             ])
@@ -401,8 +454,16 @@ mod tests {
 
     #[test]
     fn entry_blocks_are_anchored_even_when_changed() {
-        let a = func(vec![block(0, vec![tline("x = 1"), tline("return x")], vec![])]);
-        let b = func(vec![block(0, vec![tline("y = 2"), tline("call init()"), tline("return y")], vec![])]);
+        let a = func(vec![block(
+            0,
+            vec![tline("x = 1"), tline("return x")],
+            vec![],
+        )]);
+        let b = func(vec![block(
+            0,
+            vec![tline("y = 2"), tline("call init()"), tline("return y")],
+            vec![],
+        )]);
         let d = block_diff(&req(a, b));
         assert_eq!(d.pairs.len(), 1);
         assert_eq!(pair_of(&d, 0).status, BlockStatus::Changed);
@@ -412,13 +473,21 @@ mod tests {
     fn reordered_blocks_match_by_content() {
         // Same blocks, different indices/order on the B side.
         let a = func(vec![
-            block(0, vec![tline("entry"), tline("if (c) goto 1 else 2")], vec![1, 2]),
+            block(
+                0,
+                vec![tline("entry"), tline("if (c) goto 1 else 2")],
+                vec![1, 2],
+            ),
             block(1, vec![tline("a = compute_one()")], vec![3]),
             block(2, vec![tline("a = compute_two()")], vec![3]),
             block(3, vec![tline("return a")], vec![]),
         ]);
         let b = func(vec![
-            block(0, vec![tline("entry"), tline("if (c) goto 1 else 2")], vec![3, 1]),
+            block(
+                0,
+                vec![tline("entry"), tline("if (c) goto 1 else 2")],
+                vec![3, 1],
+            ),
             block(1, vec![tline("a = compute_two()")], vec![2]),
             block(2, vec![tline("return a")], vec![]),
             block(3, vec![tline("a = compute_one()")], vec![2]),
@@ -435,13 +504,21 @@ mod tests {
         // B inserts a guard block between entry and body (the memcpy_diff shape).
         let a = func(vec![
             block(0, vec![tline("n = arg3")], vec![1]),
-            block(1, vec![tline("memcpy(dst, src, sx.q(n))"), tline("return")], vec![]),
+            block(
+                1,
+                vec![tline("memcpy(dst, src, sx.q(n))"), tline("return")],
+                vec![],
+            ),
         ]);
         let b = func(vec![
             block(0, vec![tline("n = arg3")], vec![1]),
             block(1, vec![tline("if (n > 0x100) goto 2 else 3")], vec![2, 3]),
             block(2, vec![tline("return -1")], vec![]),
-            block(3, vec![tline("memcpy(dst, src, zx.q(n))"), tline("return")], vec![]),
+            block(
+                3,
+                vec![tline("memcpy(dst, src, zx.q(n))"), tline("return")],
+                vec![],
+            ),
         ]);
         let d = block_diff(&req(a, b));
         assert_eq!(pair_of(&d, 0).b, 0);
@@ -474,12 +551,18 @@ mod tests {
     fn variable_renumber_is_cosmetic_at_block_level() {
         let a = func(vec![block(
             0,
-            vec![line(vec![tok("keyword", "return"), tok("localVariable", "var_10")], "return var_10")],
+            vec![line(
+                vec![tok("keyword", "return"), tok("localVariable", "var_10")],
+                "return var_10",
+            )],
             vec![],
         )]);
         let b = func(vec![block(
             0,
-            vec![line(vec![tok("keyword", "return"), tok("localVariable", "var_18")], "return var_18")],
+            vec![line(
+                vec![tok("keyword", "return"), tok("localVariable", "var_18")],
+                "return var_18",
+            )],
             vec![],
         )]);
         let d = block_diff(&req(a, b));
@@ -493,7 +576,11 @@ mod tests {
             func(vec![block(
                 0,
                 vec![line(
-                    vec![tok("keyword", "return"), tok("codeSymbol", callee), tok("text", "()")],
+                    vec![
+                        tok("keyword", "return"),
+                        tok("codeSymbol", callee),
+                        tok("text", "()"),
+                    ],
                     &format!("return {}()", callee),
                 )],
                 vec![],
@@ -528,11 +615,19 @@ mod tests {
     fn dissimilar_leftovers_stay_unmatched() {
         let a = func(vec![
             block(0, vec![tline("entry")], vec![1]),
-            block(1, vec![tline("a"), tline("b"), tline("c"), tline("d")], vec![]),
+            block(
+                1,
+                vec![tline("a"), tline("b"), tline("c"), tline("d")],
+                vec![],
+            ),
         ]);
         let b = func(vec![
             block(0, vec![tline("entry")], vec![1]),
-            block(1, vec![tline("w"), tline("x"), tline("y"), tline("z")], vec![]),
+            block(
+                1,
+                vec![tline("w"), tline("x"), tline("y"), tline("z")],
+                vec![],
+            ),
         ]);
         let d = block_diff(&req(a, b));
         // Block 1 pairs are below the 0.5 threshold -> unmatched on both sides.
