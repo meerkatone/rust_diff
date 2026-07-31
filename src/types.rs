@@ -47,6 +47,11 @@ pub struct DiffResult {
     pub unmatched_functions_a: Vec<FunctionInfo>,
     pub unmatched_functions_b: Vec<FunctionInfo>,
     pub similarity_score: f64,
+    /// Mean similarity of matched pairs only.
+    pub matched_similarity_score: f64,
+    /// Fraction of functions covered by a one-to-one match, using the larger
+    /// binary's function count as the denominator.
+    pub match_coverage: f64,
     pub analysis_time: f64,
     pub binary_a_name: String,
     pub binary_b_name: String,

@@ -12,7 +12,7 @@ impl SimilarityAnalyzer {
         let union = set_a.union(set_b).count();
 
         if union == 0 {
-            1.0 // Both sets are empty
+            0.0 // Absence of a feature is not positive matching evidence.
         } else {
             intersection as f64 / union as f64
         }
@@ -73,7 +73,7 @@ impl SimilarityAnalyzer {
 
     /// Calculate normalized edit distance (0.0 to 1.0)
     pub fn normalized_edit_distance(s1: &str, s2: &str) -> f64 {
-        let max_len = s1.len().max(s2.len());
+        let max_len = s1.chars().count().max(s2.chars().count());
         if max_len == 0 {
             return 1.0;
         }
@@ -212,28 +212,16 @@ impl SimilarityAnalyzer {
 
     /// Calculate function call similarity
     pub fn function_call_similarity(func_a: &FunctionInfo, func_b: &FunctionInfo) -> f64 {
-        // Extract function calls from instructions
-        let calls_a = Self::extract_function_calls(func_a);
-        let calls_b = Self::extract_function_calls(func_b);
-
-        Self::jaccard_similarity(&calls_a, &calls_b)
-    }
-
-    /// Extract function calls from instructions
-    fn extract_function_calls(func: &FunctionInfo) -> FxHashSet<String> {
-        let mut calls = FxHashSet::default();
-
-        for instr in &func.instructions {
-            // Look for call instructions
-            if instr.mnemonic.to_lowercase().contains("call") {
-                // Extract the target from operands
-                if let Some(target) = instr.operands.first() {
-                    calls.insert(target.clone());
-                }
-            }
+        // Callee addresses and rendered operands relocate between binaries, so
+        // compare call-graph degree here. Matched-neighbor identity is handled
+        // by the propagation phase.
+        let a = func_a.callees.len();
+        let b = func_b.callees.len();
+        if a == 0 && b == 0 {
+            0.0
+        } else {
+            1.0 - (a as f64 - b as f64).abs() / a.max(b) as f64
         }
-
-        calls
     }
 
     /// Calculate constant similarity between functions
@@ -296,16 +284,26 @@ impl SimilarityAnalyzer {
 
     /// Calculate overall function similarity using multiple metrics
     pub fn comprehensive_similarity(func_a: &FunctionInfo, func_b: &FunctionInfo) -> f64 {
-        let weights = [
-            (Self::control_flow_similarity(func_a, func_b), 0.3),
-            (Self::function_call_similarity(func_a, func_b), 0.2),
-            (Self::constant_similarity(func_a, func_b), 0.2),
-            (Self::string_similarity(func_a, func_b), 0.1),
-            (
+        let constants_a = Self::extract_constants(func_a);
+        let constants_b = Self::extract_constants(func_b);
+        let strings_a = Self::extract_strings(func_a);
+        let strings_b = Self::extract_strings(func_b);
+        let mut weights = vec![(Self::control_flow_similarity(func_a, func_b), 0.3)];
+        if !func_a.callees.is_empty() || !func_b.callees.is_empty() {
+            weights.push((Self::function_call_similarity(func_a, func_b), 0.2));
+        }
+        if !constants_a.is_empty() || !constants_b.is_empty() {
+            weights.push((Self::jaccard_similarity(&constants_a, &constants_b), 0.2));
+        }
+        if !strings_a.is_empty() || !strings_b.is_empty() {
+            weights.push((Self::jaccard_similarity(&strings_a, &strings_b), 0.1));
+        }
+        if !func_a.instructions.is_empty() || !func_b.instructions.is_empty() {
+            weights.push((
                 Self::instruction_sequence_similarity(&func_a.instructions, &func_b.instructions),
                 0.2,
-            ),
-        ];
+            ));
+        }
 
         let mut total_weighted_score = 0.0;
         let mut total_weight = 0.0;
@@ -339,5 +337,22 @@ impl SimilarityAnalyzer {
         }
 
         matrix
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_set_features_are_not_positive_evidence() {
+        let empty = FxHashSet::default();
+        assert_eq!(SimilarityAnalyzer::jaccard_similarity(&empty, &empty), 0.0);
+    }
+
+    #[test]
+    fn unicode_edit_similarity_uses_character_lengths() {
+        assert_eq!(SimilarityAnalyzer::normalized_edit_distance("é", "e"), 0.0);
+        assert_eq!(SimilarityAnalyzer::normalized_edit_distance("é", "é"), 1.0);
     }
 }

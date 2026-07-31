@@ -1,8 +1,48 @@
 use crate::{DiffResult, FunctionInfo, FunctionMatch};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Read;
 use std::path::Path;
+
+fn sha256_file(path: &str) -> Result<String> {
+    let mut file = fs::File::open(path).with_context(|| format!("Failed to open {path}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Failed to read {path}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn csv_field(value: &str) -> String {
+    let safe = if value
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'))
+    {
+        format!("'{value}")
+    } else {
+        value.to_string()
+    };
+    format!("\"{}\"", safe.replace('"', "\"\""))
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiffDatabase {
@@ -39,14 +79,14 @@ impl DatabaseManager {
         let metadata = DatabaseMetadata {
             created_at: chrono::Utc::now().to_rfc3339(),
             plugin_version: env!("CARGO_PKG_VERSION").to_string(),
-            binary_a_hash: "".to_string(), // TODO: Calculate actual hash
-            binary_b_hash: "".to_string(), // TODO: Calculate actual hash
+            binary_a_hash: sha256_file(binary_a_path)?,
+            binary_b_hash: sha256_file(binary_b_path)?,
             total_functions_a: diff_result.matched_functions.len()
                 + diff_result.unmatched_functions_a.len(),
             total_functions_b: diff_result.matched_functions.len()
                 + diff_result.unmatched_functions_b.len(),
             total_matches: diff_result.matched_functions.len(),
-            analysis_time_seconds: 0.0, // TODO: Track actual time
+            analysis_time_seconds: diff_result.analysis_time,
         };
 
         let database = DiffDatabase {
@@ -97,9 +137,9 @@ impl DatabaseManager {
         for match_result in &database.matches {
             csv_content.push_str(&format!(
                 "{},{:x},{},{:x},{:.4},{:.4},{:?},{},{},{},{},{},{}\n",
-                match_result.function_a.name,
+                csv_field(&match_result.function_a.name),
                 match_result.function_a.address,
-                match_result.function_b.name,
+                csv_field(&match_result.function_b.name),
                 match_result.function_b.address,
                 match_result.similarity,
                 match_result.confidence,
@@ -108,8 +148,8 @@ impl DatabaseManager {
                 match_result.function_b.size,
                 match_result.function_a.basic_blocks.len(),
                 match_result.function_b.basic_blocks.len(),
-                match_result.function_a.instructions.len(),
-                match_result.function_b.instructions.len()
+                match_result.function_a.instruction_count,
+                match_result.function_b.instruction_count
             ));
         }
 
@@ -227,8 +267,8 @@ impl DatabaseManager {
 "#,
             database.metadata.plugin_version,
             database.metadata.created_at,
-            database.binary_a_path,
-            database.binary_b_path,
+            html_escape(&database.binary_a_path),
+            html_escape(&database.binary_b_path),
             database.metadata.total_functions_a,
             database.metadata.total_functions_b,
             database.metadata.total_matches,
@@ -265,9 +305,9 @@ impl DatabaseManager {
                     <td>{:?}</td>
                 </tr>"#,
                 class,
-                match_result.function_a.name,
+                html_escape(&match_result.function_a.name),
                 match_result.function_a.address,
-                match_result.function_b.name,
+                html_escape(&match_result.function_b.name),
                 match_result.function_b.address,
                 match_result.similarity,
                 match_result.confidence,

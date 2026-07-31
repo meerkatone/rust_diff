@@ -1,5 +1,5 @@
-use crate::{BinaryDiffEngine, DiffResult};
-use log::{error, info};
+use crate::BinaryDiffEngine;
+use log::error;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -14,32 +14,16 @@ fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rust_diff_init() -> *mut BinaryDiffEngine {
-    guard(std::ptr::null_mut(), || {
-        let _ = env_logger::try_init();
-        info!("Initializing Rust Diff engine");
-        Box::into_raw(Box::new(BinaryDiffEngine::new()))
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn rust_diff_cleanup(engine: *mut BinaryDiffEngine) {
-    guard((), || {
-        if !engine.is_null() {
-            unsafe {
-                let _ = Box::from_raw(engine);
-            }
-        }
-    })
-}
-
 /// Diff two binaries from JSON-encoded function arrays and return the full
 /// DiffResult as a JSON C string (caller frees with rust_diff_free_string).
 /// Returns null on parse/diff failure. This is the entry point the Binary
 /// Ninja Python frontend uses; no engine handle is needed.
+///
+/// # Safety
+/// Both pointers must reference valid, NUL-terminated UTF-8 strings for the
+/// duration of the call.
 #[no_mangle]
-pub extern "C" fn rust_diff_diff_json(
+pub unsafe extern "C" fn rust_diff_diff_json(
     functions_a_json: *const c_char,
     functions_b_json: *const c_char,
 ) -> *mut c_char {
@@ -87,8 +71,12 @@ pub extern "C" fn rust_diff_diff_json(
 /// this normalizes volatile tokens and resolves matched-callee renames, so a
 /// renamed call is reported as cosmetic while a replaced call is a real change.
 /// Callable directly from the Python frontend at diff-view time.
+///
+/// # Safety
+/// `request_json` must reference a valid, NUL-terminated UTF-8 string for the
+/// duration of the call.
 #[no_mangle]
-pub extern "C" fn rust_diff_il_diff_json(request_json: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn rust_diff_il_diff_json(request_json: *const c_char) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         if request_json.is_null() {
             return std::ptr::null_mut();
@@ -125,8 +113,12 @@ pub extern "C" fn rust_diff_il_diff_json(request_json: *const c_char) -> *mut c_
 /// rust_diff_free_string), or null on parse failure:
 /// `{ pairs: [{a, b, status, similarity}], only_a: [...], only_b: [...], similarity }`.
 /// Drives the graph diff overlay: per-pair status is equal / cosmetic / changed.
+///
+/// # Safety
+/// `request_json` must reference a valid, NUL-terminated UTF-8 string for the
+/// duration of the call.
 #[no_mangle]
-pub extern "C" fn rust_diff_block_diff_json(request_json: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn rust_diff_block_diff_json(request_json: *const c_char) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         if request_json.is_null() {
             return std::ptr::null_mut();
@@ -157,71 +149,17 @@ pub extern "C" fn rust_diff_block_diff_json(request_json: *const c_char) -> *mut
 }
 
 /// Free a string returned by rust_diff_diff_json.
+///
+/// # Safety
+/// `s` must be null or a pointer returned by one of this library's JSON FFI
+/// functions, and it must be freed exactly once.
 #[no_mangle]
-pub extern "C" fn rust_diff_free_string(s: *mut c_char) {
+pub unsafe extern "C" fn rust_diff_free_string(s: *mut c_char) {
     guard((), || {
         if !s.is_null() {
             unsafe {
                 let _ = CString::from_raw(s);
             }
-        }
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn rust_diff_free_result(result: *mut DiffResult) {
-    guard((), || {
-        if !result.is_null() {
-            unsafe {
-                let _ = Box::from_raw(result);
-            }
-        }
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn rust_diff_get_match_count(result: *const DiffResult) -> usize {
-    guard(0, || {
-        if result.is_null() {
-            return 0;
-        }
-        let result = unsafe { &*result };
-        result.matched_functions.len()
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn rust_diff_get_similarity_score(result: *const DiffResult) -> f64 {
-    guard(0.0, || {
-        if result.is_null() {
-            return 0.0;
-        }
-        let result = unsafe { &*result };
-        result.similarity_score
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn rust_diff_save_results(
-    result: *const DiffResult,
-    output_path: *const c_char,
-) -> i32 {
-    guard(-1, || {
-        if result.is_null() || output_path.is_null() {
-            return -1;
-        }
-
-        let result = unsafe { &*result };
-        let output_path = unsafe { CStr::from_ptr(output_path) };
-        let output_path = match output_path.to_str() {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
-
-        let engine = BinaryDiffEngine::new();
-        match engine.save_results(result, output_path) {
-            Ok(_) => 0,
-            Err(_) => -1,
         }
     })
 }

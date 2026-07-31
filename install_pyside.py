@@ -5,7 +5,6 @@ Helper script to install PySide6 in Binary Ninja's Python environment
 
 import subprocess
 import sys
-import os
 
 def install_pyside():
     """Install PySide6 using pip"""

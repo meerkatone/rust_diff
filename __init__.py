@@ -16,6 +16,7 @@ import json
 import os
 import platform
 import sys
+import time
 
 # Add the plugin directory to sys.path for imports
 plugin_dir = os.path.dirname(os.path.abspath(__file__))
@@ -277,6 +278,71 @@ _REFINE_MIN_INSTRS = 5      # below this, IL carries too little signal
 _REFINE_IL_LEVEL = "MLIL"   # fast, more stable across builds than LLIL
 
 
+def _confidence_for_match(match_type, similarity):
+    """Mirror the Rust confidence calibration after Python-side refinement."""
+    s = max(0.0, min(1.0, float(similarity)))
+    if match_type == "Exact":
+        return 1.0
+    if match_type == "Name":
+        return 0.90 + 0.10 * s
+    if match_type == "MdIndex":
+        return 0.80 + 0.10 * s
+    if match_type == "SmallPrimes":
+        return 0.75 + 0.10 * s
+    if match_type == "Structural":
+        return 0.70 + 0.15 * s
+    if match_type == "CallGraph":
+        return 0.50 + 0.35 * s
+    if match_type == "IL":
+        return 0.45 + 0.45 * s
+    if match_type == "Manual":
+        return 1.0
+    return 0.35 + 0.45 * s
+
+
+def _callee_maps(bv_a, bv_b, match_index, address_a):
+    """Build semantic rename/relocation maps for one A-side function."""
+    rename_map, addr_map = {}, {}
+    try:
+        func_a = bv_a.get_function_at(address_a)
+    except Exception:
+        return rename_map, addr_map
+    if func_a is None:
+        return rename_map, addr_map
+    try:
+        callees = list(func_a.callees)
+    except Exception:
+        return rename_map, addr_map
+    for callee_a in callees:
+        address_b = match_index.get(callee_a.start)
+        if address_b is None:
+            continue
+        try:
+            callee_b = bv_b.get_function_at(address_b)
+        except Exception:
+            continue
+        if callee_b is None:
+            continue
+        if callee_a.name and callee_b.name and callee_a.name != callee_b.name:
+            rename_map[callee_a.name] = callee_b.name
+        if callee_a.start != callee_b.start:
+            addr_map[f"0x{callee_a.start:x}"] = f"0x{callee_b.start:x}"
+    return rename_map, addr_map
+
+
+def _recompute_result_metrics(result):
+    matches = result.get("matched_functions", [])
+    total_a = len(matches) + len(result.get("unmatched_functions_a", []))
+    total_b = len(matches) + len(result.get("unmatched_functions_b", []))
+    mean = (sum(m.get("similarity", 0.0) for m in matches) / len(matches)
+            if matches else (1.0 if total_a == 0 and total_b == 0 else 0.0))
+    denominator = max(total_a, total_b)
+    coverage = len(matches) / denominator if denominator else 1.0
+    result["matched_similarity_score"] = round(mean, 6)
+    result["match_coverage"] = round(coverage, 6)
+    result["similarity_score"] = round(mean * coverage, 6)
+
+
 def _il_for(bv, address, cache):
     """Extract (and cache) the IL token stream for one function address."""
     if address in cache:
@@ -287,7 +353,7 @@ def _il_for(bv, address, cache):
     return il
 
 
-def refine_matches_with_il(bv_a, bv_b, result, progress=None):
+def refine_matches_with_il(bv_a, bv_b, result, progress=None, cancelled=None):
     """Confirm/re-rank weak matches and rescue missed ones using semantic IL
     similarity. Mutates `result` in place; safe to skip on any failure."""
     if load_rust_engine() is None:
@@ -295,10 +361,25 @@ def refine_matches_with_il(bv_a, bv_b, result, progress=None):
 
     cache_a, cache_b = {}, {}
     matches = result.get("matched_functions", [])
+    match_index = {
+        m.get("function_a", {}).get("address"): m.get("function_b", {}).get("address")
+        for m in matches
+        if m.get("function_a", {}).get("address") is not None
+        and m.get("function_b", {}).get("address") is not None
+    }
+    callee_map_cache = {}
+
+    def maps_for(address):
+        if address not in callee_map_cache:
+            callee_map_cache[address] = _callee_maps(
+                bv_a, bv_b, match_index, address)
+        return callee_map_cache[address]
 
     # 1. Re-check weak matches: blend IL similarity into the score.
     refined = 0
     for m in matches:
+        if cancelled is not None and cancelled():
+            return
         if refined >= _REFINE_MAX:
             break
         if m.get("match_type") in _STRONG_MATCH_TYPES and m.get("confidence", 0) >= _REFINE_CONF_BELOW:
@@ -308,13 +389,16 @@ def refine_matches_with_il(bv_a, bv_b, result, progress=None):
             continue
         il_a = _il_for(bv_a, fa.get("address"), cache_a)
         il_b = _il_for(bv_b, fb.get("address"), cache_b)
-        d = il_diff(il_a, il_b)
+        rename_map, addr_map = maps_for(fa.get("address"))
+        d = il_diff(il_a, il_b, rename_map, addr_map)
         if d is None:
             continue
         il_sim = d.get("similarity", 0.0)
         m["il_similarity"] = round(il_sim, 4)
         # Blend so IL evidence can both raise and lower a weak score.
         m["similarity"] = round(0.5 * m.get("similarity", 0.0) + 0.5 * il_sim, 4)
+        m["confidence"] = round(
+            _confidence_for_match(m.get("match_type"), m["similarity"]), 4)
         refined += 1
 
     # 2. Rescue: score each unmatched-A against size-near unmatched-B.
@@ -330,6 +414,8 @@ def refine_matches_with_il(bv_a, bv_b, result, progress=None):
 
     import bisect
     for ai, fa in enumerate(unmatched_a[:_RESCUE_MAX_A]):
+        if cancelled is not None and cancelled():
+            return
         ca = fa.get("instruction_count", 0)
         if ca < _REFINE_MIN_INSTRS or not b_pool:
             continue
@@ -342,11 +428,14 @@ def refine_matches_with_il(bv_a, bv_b, result, progress=None):
             continue
         best = None
         for j in cand_idx:
+            if cancelled is not None and cancelled():
+                return
             fb = b_pool[j]
             if fb.get("address") in used_b_addrs:
                 continue
             il_b = _il_for(bv_b, fb.get("address"), cache_b)
-            d = il_diff(il_a, il_b)
+            rename_map, addr_map = maps_for(fa.get("address"))
+            d = il_diff(il_a, il_b, rename_map, addr_map)
             if d is None:
                 continue
             il_sim = d.get("similarity", 0.0)
@@ -366,7 +455,7 @@ def refine_matches_with_il(bv_a, bv_b, result, progress=None):
                 "function_a": fa,
                 "function_b": fb,
                 "similarity": round(il_sim, 4),
-                "confidence": round(il_sim, 4),
+                "confidence": round(_confidence_for_match("IL", il_sim), 4),
                 "match_type": "IL",
                 "il_similarity": round(il_sim, 4),
                 "details": {},
@@ -376,11 +465,8 @@ def refine_matches_with_il(bv_a, bv_b, result, progress=None):
         result["unmatched_functions_b"] = [
             f for f in unmatched_b if f.get("address") not in used_b_addrs]
 
-    # Re-derive the overall score: blended similarities and rescued matches
-    # changed the per-match values, so the cached aggregate is now stale.
-    if matches:
-        result["similarity_score"] = round(
-            sum(m.get("similarity", 0.0) for m in matches) / len(matches), 6)
+    # Blended similarities and rescued matches changed all aggregate metrics.
+    _recompute_result_metrics(result)
 
     if progress is not None:
         progress(refined, len(rescued))
@@ -413,6 +499,7 @@ class BinaryDiffTask(BackgroundTaskThread):
         return functions
 
     def run(self):
+        started = time.monotonic()
         try:
             self.progress = "Extracting features from first binary..."
             features1 = self._extract_binary_features(self.bv1)
@@ -426,7 +513,7 @@ class BinaryDiffTask(BackgroundTaskThread):
 
             self.progress = f"Matching {len(features1)} x {len(features2)} functions (Rust engine)..."
             result = rust_diff(features1, features2)
-            if result is None:
+            if result is None or self.cancelled:
                 return
 
             result["binary_a_name"] = self.bv1.file.filename
@@ -439,11 +526,14 @@ class BinaryDiffTask(BackgroundTaskThread):
                     def _report(refined, rescued):
                         log_info(f"IL refinement: re-checked {refined} weak match(es), "
                                  f"rescued {rescued} new match(es)")
-                    refine_matches_with_il(self.bv1, self.bv2, result, progress=_report)
+                    refine_matches_with_il(
+                        self.bv1, self.bv2, result, progress=_report,
+                        cancelled=lambda: self.cancelled)
                 except Exception as e:
                     log_error(f"IL refinement pass failed (continuing): {e}")
 
             self.result = result
+            result["analysis_time"] = time.monotonic() - started
 
             log_info(
                 f"Binary diff completed in {result.get('analysis_time', 0):.2f}s: "
@@ -468,6 +558,8 @@ def _log_summary(result):
     log_info(f"Binary 1: {result.get('binary_a_name')}")
     log_info(f"Binary 2: {result.get('binary_b_name')}")
     log_info(f"Overall similarity: {result.get('similarity_score', 0):.4f}")
+    log_info(f"Matched-pair similarity: {result.get('matched_similarity_score', 0):.4f}")
+    log_info(f"Match coverage: {result.get('match_coverage', 0):.2%}")
     log_info("-" * 60)
 
     by_type = {}
@@ -508,9 +600,12 @@ def run_binary_diff(bv):
         def _on_complete(result):
             # Runs on the background task thread; do log work here and marshal
             # any GUI work to the main thread.
-            if not result or not result.get("matched_functions"):
-                log_info("No function matches found")
+            if not result:
+                log_error("Binary diff did not produce a result")
                 return
+
+            if not result.get("matched_functions"):
+                log_info("No function matches found; showing unmatched results")
 
             _log_summary(result)
 

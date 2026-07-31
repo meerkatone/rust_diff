@@ -44,6 +44,15 @@ fn is_return_mnemonic(m: &str) -> bool {
     m.starts_with("ret") || m == "bx lr" || m == "jr ra"
 }
 
+fn is_informative_name(name: &str) -> bool {
+    let name = name.trim_start_matches("j_");
+    !name.is_empty()
+        && name != "unnamed"
+        && !["sub_", "SUB_", "FUN_", "fun_", "loc_", "fcn.", "func_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
 impl DiffAlgorithms {
     /// Calculate similarity between two functions using multiple metrics
     /// and return both the weighted score and detailed per-metric breakdown.
@@ -63,14 +72,32 @@ impl DiffAlgorithms {
         let call_similarity =
             sanitize_score(SimilarityAnalyzer::function_call_similarity(func_a, func_b));
 
-        let weighted_similarity = sanitize_score(
-            cfg_similarity * 0.30
-                + call_similarity * 0.20
-                + bb_similarity * 0.15
-                + instruction_similarity * 0.15
-                + name_similarity * 0.10
-                + edge_similarity * 0.10,
-        );
+        // Missing features are not positive evidence and must not silently
+        // award points. Re-normalize over only the metrics that carry signal.
+        let mut weighted_sum = cfg_similarity * 0.30;
+        let mut total_weight = 0.30;
+        if !func_a.callees.is_empty() || !func_b.callees.is_empty() {
+            weighted_sum += call_similarity * 0.20;
+            total_weight += 0.20;
+        }
+        if !func_a.basic_blocks.is_empty() || !func_b.basic_blocks.is_empty() {
+            weighted_sum += bb_similarity * 0.15;
+            total_weight += 0.15;
+        }
+        if !func_a.instructions.is_empty() || !func_b.instructions.is_empty() {
+            weighted_sum += instruction_similarity * 0.15;
+            total_weight += 0.15;
+        }
+        if is_informative_name(&func_a.name) || is_informative_name(&func_b.name) {
+            weighted_sum += name_similarity * 0.10;
+            total_weight += 0.10;
+        }
+        let has_edges = |f: &FunctionInfo| f.basic_blocks.iter().any(|bb| !bb.edges.is_empty());
+        if has_edges(func_a) || has_edges(func_b) {
+            weighted_sum += edge_similarity * 0.10;
+            total_weight += 0.10;
+        }
+        let weighted_similarity = sanitize_score(weighted_sum / total_weight);
 
         let details = MatchDetails {
             cfg_similarity,
@@ -247,7 +274,7 @@ impl DiffAlgorithms {
                 let has_ret = bb
                     .instructions
                     .last()
-                    .map_or(false, |ins| is_return_mnemonic(&ins.mnemonic));
+                    .is_some_and(|ins| is_return_mnemonic(&ins.mnemonic));
                 stable_hash(&(degree_class, has_call, has_ret))
             })
             .collect();
@@ -398,7 +425,7 @@ impl DiffAlgorithms {
             if primes
                 .iter()
                 .take_while(|&&p| p * p <= candidate)
-                .all(|&p| candidate % p != 0)
+                .all(|&p| !candidate.is_multiple_of(p))
             {
                 primes.push(candidate);
             }
@@ -426,24 +453,21 @@ impl DiffAlgorithms {
         product as u64
     }
 
-    /// Fuzzy hash calculation for functions.
-    /// Encodes basic block structure and instruction mnemonic patterns.
-    pub fn calculate_fuzzy_hash(func: &FunctionInfo) -> String {
-        let mut hash_input = String::new();
-
-        // Encode basic block structure (instruction count per block, not addresses)
-        for bb in &func.basic_blocks {
-            hash_input.push_str(&format!("bb{}e{}_", bb.instructions.len(), bb.edges.len()));
-        }
-
-        // Encode instruction mnemonic sequence
-        for instr in &func.instructions {
-            hash_input.push_str(&instr.mnemonic);
-            hash_input.push('_');
-        }
-
+    /// Exact instruction-content digest used by the strongest matching phase.
+    /// CFG shape is keyed separately. Operands are intentionally retained: a
+    /// changed bound, call target, or mask is not byte-for-byte exact even when
+    /// its mnemonic sequence is unchanged.
+    pub fn calculate_instruction_content_hash(func: &FunctionInfo) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(hash_input.as_bytes());
+        for instr in &func.instructions {
+            hasher.update(instr.mnemonic.trim().to_ascii_lowercase().as_bytes());
+            hasher.update([0]);
+            for operand in &instr.operands {
+                hasher.update(operand.split_whitespace().collect::<String>().as_bytes());
+                hasher.update([0xff]);
+            }
+            hasher.update([0xfe]);
+        }
         let result = hasher.finalize();
         hex::encode(&result[..8])
     }

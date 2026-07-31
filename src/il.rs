@@ -3,8 +3,9 @@
 //! A plain textual diff of rendered IL is misleading: a *renamed* callee and a
 //! *replaced* callee produce identical text diffs even though one is cosmetic
 //! and the other is a real semantic change. The fix is to diff a *normalized*
-//! token stream — volatile tokens (variables, immediates, stack offsets,
-//! addresses) are canonicalized, and matched-callee renames are resolved
+//! token stream — generated variable names and relocated addresses are
+//! canonicalized, while semantic values such as constants are preserved, and
+//! matched-callee renames are resolved
 //! through a rename map — so the differ compares structure, not surface text.
 //!
 //! The frontend (Binary Ninja Python) extracts a typed token stream per IL
@@ -103,10 +104,36 @@ pub struct IlDiff {
     pub similarity: f64,
 }
 
-/// Canonicalize one token: volatile kinds collapse to a placeholder so cosmetic
-/// differences don't register as semantic ones. Callee symbols are resolved
-/// through `rename_map` (forward, A->B) so a matched rename normalizes equal on
-/// both sides.
+/// Canonicalize one token. Generated locals and relocated data addresses are
+/// normalized, while constants and analyst-provided identities remain literal.
+/// Callee symbols are resolved through `rename_map` (forward, A->B) so a matched
+/// rename normalizes equal on both sides.
+fn is_hex(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Normalize only variable names Binary Ninja is known to synthesize. Analyst
+/// names remain literal: collapsing every variable to one `VAR` token hides
+/// operand swaps such as `dst = src` -> `src = dst`.
+fn canonical_variable(text: &str) -> String {
+    let text = text.trim();
+    let base = strip_generated_dup_suffix(text);
+    if let Some(storage) = base.strip_prefix("var_") {
+        if is_hex(storage) {
+            return "AUTO_LOCAL".to_string();
+        }
+    }
+    if let Some(index) = base
+        .strip_prefix("arg_")
+        .or_else(|| base.strip_prefix("arg"))
+    {
+        if !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) {
+            return format!("ARG:{index}");
+        }
+    }
+    format!("VAR:{base}")
+}
+
 fn canonical_token(
     tok: &IlToken,
     rename_map: &HashMap<String, String>,
@@ -116,11 +143,13 @@ fn canonical_token(
     // and loosely (contains) so LLIL/MLIL/HLIL variants all collapse correctly.
     let kind = tok.kind.to_ascii_lowercase();
     if kind.contains("variable") || kind.contains("localvar") || kind.contains("stackvar") {
-        return "VAR".to_string();
+        return canonical_variable(&tok.text);
     }
+    // Constants are semantic. In particular, bounds and bit masks are common
+    // patch-diff signals and must not be normalized away.
     if kind.contains("integer") || kind.contains("possiblevalue") || kind.contains("floatingpoint")
     {
-        return "IMM".to_string();
+        return format!("CONST:{}", tok.text.trim().to_ascii_lowercase());
     }
     // Code/call-target addresses are kept literal so a genuinely changed call
     // target surfaces as a real change. A matched callee that merely relocated
@@ -129,7 +158,7 @@ fn canonical_token(
     if kind.contains("coderelative") || kind.contains("codeaddress") {
         let text = tok.text.trim();
         let resolved = addr_map.get(text).map(String::as_str).unwrap_or(text);
-        return strip_dup_suffix(resolved).to_string();
+        return resolved.to_string();
     }
     if kind.contains("address") {
         return "ADDR".to_string();
@@ -140,7 +169,16 @@ fn canonical_token(
             .get(&tok.text)
             .cloned()
             .unwrap_or_else(|| tok.text.clone());
-        return format!("SYM:{}", strip_dup_suffix(&resolved));
+        // Binary Ninja sometimes appends a short duplicate suffix to generated
+        // data symbols. Do not do this for arbitrary symbols: AES_128 and
+        // AES_256, for example, are meaningfully different.
+        let normalized =
+            if kind.contains("data") && (resolved.starts_with("__") || resolved.contains('@')) {
+                strip_generated_dup_suffix(&resolved)
+            } else {
+                &resolved
+            };
+        return format!("SYM:{normalized}");
     }
     // Registers, keywords, operators, punctuation, raw text: kept literally
     // (they carry structural meaning). Whitespace-only tokens are dropped.
@@ -148,15 +186,15 @@ fn canonical_token(
     if t.is_empty() {
         String::new()
     } else {
-        strip_dup_suffix(t).to_string()
+        t.to_string()
     }
 }
 
 /// Strip a trailing `_<n>` (1-3 digits) that Binary Ninja appends to
-/// disambiguate duplicated variables/constants across builds (e.g.
+/// disambiguate generated variables/data symbols across builds (e.g.
 /// `__xmm@..0303_1` -> `__xmm@..0303`). Longer numeric suffixes are left
 /// intact so real identifiers (e.g. `Feature_1196105017`) are not mangled.
-fn strip_dup_suffix(s: &str) -> &str {
+fn strip_generated_dup_suffix(s: &str) -> &str {
     if let Some(pos) = s.rfind('_') {
         let suffix = &s[pos + 1..];
         if !suffix.is_empty()
@@ -210,6 +248,39 @@ pub fn diff_il(req: &IlDiffRequest) -> IlDiff {
     let n = keys_a.len();
     let m = keys_b.len();
 
+    // Avoid quadratic allocations on unusually large decompiler output. The
+    // positional fallback is less sophisticated than LCS alignment but remains
+    // complete, deterministic, and bounded instead of freezing Binary Ninja.
+    const MAX_LCS_CELLS: usize = 4_000_000;
+    if n.checked_mul(m).is_none_or(|cells| cells > MAX_LCS_CELLS) {
+        let common = n.min(m);
+        let mut aligned = Vec::with_capacity(n.max(m));
+        let mut equal = 0usize;
+        for i in 0..common {
+            if keys_a[i] == keys_b[i] {
+                equal += 1;
+                if req.a.lines[i].text.trim() == req.b.lines[i].text.trim() {
+                    aligned.push(Aligned::Equal(i, i));
+                } else {
+                    aligned.push(Aligned::Rename(i, i));
+                }
+            } else {
+                aligned.push(Aligned::Replace(i, i));
+            }
+        }
+        aligned.extend((common..n).map(Aligned::Delete));
+        aligned.extend((common..m).map(Aligned::Insert));
+        let similarity = if n.max(m) == 0 {
+            1.0
+        } else {
+            equal as f64 / n.max(m) as f64
+        };
+        return IlDiff {
+            lines: materialize_lines(req, aligned),
+            similarity,
+        };
+    }
+
     // LCS DP over canonical keys.
     let mut dp = vec![vec![0usize; m + 1]; n + 1];
     for i in (0..n).rev() {
@@ -261,6 +332,19 @@ pub fn diff_il(req: &IlDiffRequest) -> IlDiff {
 
     // Materialize aligned ops into DiffLines, computing token spans for the
     // changed (replace/rename) lines.
+    let lines = materialize_lines(req, aligned);
+
+    let denom = n.max(m);
+    let similarity = if denom == 0 {
+        1.0
+    } else {
+        lcs as f64 / denom as f64
+    };
+
+    IlDiff { lines, similarity }
+}
+
+fn materialize_lines(req: &IlDiffRequest, aligned: Vec<Aligned>) -> Vec<DiffLine> {
     let span_line = |idx_a: usize, idx_b: usize| {
         token_spans(
             &req.a.lines[idx_a],
@@ -269,7 +353,7 @@ pub fn diff_il(req: &IlDiffRequest) -> IlDiff {
             &req.addr_map,
         )
     };
-    let lines: Vec<DiffLine> = aligned
+    aligned
         .into_iter()
         .map(|a| match a {
             Aligned::Equal(ia, ib) => DiffLine {
@@ -314,16 +398,7 @@ pub fn diff_il(req: &IlDiffRequest) -> IlDiff {
                 b_spans: Vec::new(),
             },
         })
-        .collect();
-
-    let denom = n.max(m);
-    let similarity = if denom == 0 {
-        1.0
-    } else {
-        lcs as f64 / denom as f64
-    };
-
-    IlDiff { lines, similarity }
+        .collect()
 }
 
 /// Token-level LCS between two lines over their canonical token forms; returns
@@ -350,6 +425,22 @@ fn token_spans(
         .collect();
 
     let (na, nb) = (ta.len(), tb.len());
+    const MAX_TOKEN_LCS_CELLS: usize = 65_536;
+    if na
+        .checked_mul(nb)
+        .is_none_or(|cells| cells > MAX_TOKEN_LCS_CELLS)
+    {
+        let spans = |tokens: Vec<(&IlToken, String)>| {
+            tokens
+                .into_iter()
+                .map(|(token, canonical)| TokenSpan {
+                    text: token.text.clone(),
+                    changed: !canonical.is_empty(),
+                })
+                .collect()
+        };
+        return (spans(ta), spans(tb));
+    }
     let mut dp = vec![vec![0usize; nb + 1]; na + 1];
     for i in (0..na).rev() {
         for j in (0..nb).rev() {
@@ -717,8 +808,8 @@ mod tests {
             addr_map: HashMap::new(),
         };
         let d = diff_il(&req);
-        // `Feature_42` strips to `Feature`; `Feature_1196105017` keeps its long
-        // suffix -> the two differ -> a real change, not a spurious match.
+        // Neither identifier is a generated data symbol, so both remain
+        // literal and the two differ.
         assert_eq!(
             d.lines[0].op,
             DiffOp::Replace,
@@ -914,5 +1005,100 @@ mod tests {
         };
         let d = diff_il(&req);
         assert_eq!(d.lines[0].op, DiffOp::Rename);
+    }
+
+    #[test]
+    fn changed_integer_bound_is_semantic() {
+        let mk = |bound: &str| {
+            vec![line(
+                vec![
+                    tok("keyword", "if"),
+                    tok("text", " ("),
+                    tok("localVariable", "len"),
+                    tok("text", " > "),
+                    tok("integer", bound),
+                    tok("text", ")"),
+                ],
+                &format!("if (len > {bound})"),
+            )]
+        };
+        let req = IlDiffRequest {
+            a: IlFunction {
+                level: "MLIL".into(),
+                lines: mk("64"),
+            },
+            b: IlFunction {
+                level: "MLIL".into(),
+                lines: mk("128"),
+            },
+            ..Default::default()
+        };
+        let d = diff_il(&req);
+        assert_eq!(d.lines[0].op, DiffOp::Replace);
+        assert_eq!(d.similarity, 0.0);
+    }
+
+    #[test]
+    fn meaningful_variable_swap_is_semantic() {
+        let mk = |left: &str, right: &str| {
+            vec![line(
+                vec![
+                    tok("localVariable", left),
+                    tok("text", " = "),
+                    tok("localVariable", right),
+                ],
+                &format!("{left} = {right}"),
+            )]
+        };
+        let req = IlDiffRequest {
+            a: IlFunction {
+                level: "MLIL".into(),
+                lines: mk("dst", "src"),
+            },
+            b: IlFunction {
+                level: "MLIL".into(),
+                lines: mk("src", "dst"),
+            },
+            ..Default::default()
+        };
+        assert_eq!(diff_il(&req).lines[0].op, DiffOp::Replace);
+    }
+
+    #[test]
+    fn meaningful_short_numeric_symbol_suffix_is_preserved() {
+        let mk = |name: &str| vec![line(vec![tok("codeSymbol", name)], name)];
+        let req = IlDiffRequest {
+            a: IlFunction {
+                level: "HLIL".into(),
+                lines: mk("AES_128"),
+            },
+            b: IlFunction {
+                level: "HLIL".into(),
+                lines: mk("AES_256"),
+            },
+            ..Default::default()
+        };
+        assert_eq!(diff_il(&req).lines[0].op, DiffOp::Replace);
+    }
+
+    #[test]
+    fn very_large_diff_uses_bounded_fallback() {
+        let lines: Vec<IlLine> = (0..2001)
+            .map(|i| line(vec![tok("integer", &i.to_string())], &i.to_string()))
+            .collect();
+        let req = IlDiffRequest {
+            a: IlFunction {
+                level: "MLIL".into(),
+                lines: lines.clone(),
+            },
+            b: IlFunction {
+                level: "MLIL".into(),
+                lines,
+            },
+            ..Default::default()
+        };
+        let diff = diff_il(&req);
+        assert_eq!(diff.similarity, 1.0);
+        assert!(diff.lines.iter().all(|line| line.op == DiffOp::Equal));
     }
 }

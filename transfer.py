@@ -9,7 +9,7 @@ This module is pure Python over the live BinaryViews; the Rust engine is not
 involved. It is import-safe outside Binary Ninja (the bn import is lazy).
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 def _is_auto_generated_name(name: str) -> bool:
@@ -164,8 +164,6 @@ def plan_transfer(bv_a, bv_b, matches: List[dict], options: Dict[str, bool]) -> 
 def apply_transfer(bv_b, plans: List[dict]) -> dict:
     """Apply the planned changes to binary B inside a single undo action. Returns
     a summary {functions, attributes, errors}."""
-    import binaryninja as bn  # lazy: only needed at apply time inside BN
-
     applied_funcs = 0
     applied_attrs = 0
     errors = []
@@ -173,12 +171,17 @@ def apply_transfer(bv_b, plans: List[dict]) -> dict:
     undo = None
     try:
         undo = bv_b.begin_undo_actions()
-    except Exception:
-        undo = None
+    except Exception as e:
+        errors.append(f"begin undo action: {e}")
+        return {"functions": 0, "attributes": 0, "errors": errors}
 
     try:
         for plan in plans:
-            func_b = bv_b.get_function_at(plan["addr_b"])
+            try:
+                func_b = bv_b.get_function_at(plan["addr_b"])
+            except Exception as e:
+                errors.append(f"0x{plan['addr_b']:x} resolve function: {e}")
+                continue
             if not func_b:
                 continue
             # Resolve B variables by their (source_type, storage) key once.
@@ -217,13 +220,11 @@ def apply_transfer(bv_b, plans: List[dict]) -> dict:
         try:
             if undo is not None:
                 bv_b.commit_undo_actions(undo)
-            else:
-                bv_b.commit_undo_actions()
-        except Exception:
-            pass
+        except Exception as e:
+            errors.append(f"commit undo action: {e}")
         try:
             bv_b.update_analysis()
-        except Exception:
-            pass
+        except Exception as e:
+            errors.append(f"update analysis: {e}")
 
     return {"functions": applied_funcs, "attributes": applied_attrs, "errors": errors}

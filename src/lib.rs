@@ -22,6 +22,12 @@ pub struct BinaryDiffEngine {
     pub confidence_threshold: f64,
 }
 
+impl Default for BinaryDiffEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BinaryDiffEngine {
     pub fn new() -> Self {
         Self {
@@ -106,6 +112,8 @@ impl BinaryDiffEngine {
         binary_b_name: &str,
     ) -> Result<DiffResult> {
         let start_time = Instant::now();
+        let total_functions_a = functions_a.len();
+        let total_functions_b = functions_b.len();
 
         info!(
             "Diffing {} functions against {}",
@@ -132,11 +140,22 @@ impl BinaryDiffEngine {
             .filter(|f| !matched_b.contains(&f.address))
             .collect();
 
-        let similarity_score = if !matches.is_empty() {
+        let matched_similarity_score = if !matches.is_empty() {
             matches.iter().map(|m| m.similarity).sum::<f64>() / matches.len() as f64
+        } else if total_functions_a == 0 && total_functions_b == 0 {
+            1.0
         } else {
             0.0
         };
+        let total_functions = total_functions_a.max(total_functions_b);
+        let match_coverage = if total_functions == 0 {
+            1.0
+        } else {
+            matches.len() as f64 / total_functions as f64
+        };
+        // Coverage-adjusted binary similarity: unmatched functions contribute
+        // zero instead of disappearing from the aggregate.
+        let similarity_score = matched_similarity_score * match_coverage;
 
         let analysis_time = start_time.elapsed().as_secs_f64();
 
@@ -152,6 +171,8 @@ impl BinaryDiffEngine {
             unmatched_functions_a: unmatched_a,
             unmatched_functions_b: unmatched_b,
             similarity_score,
+            matched_similarity_score,
+            match_coverage,
             analysis_time,
             binary_a_name: binary_a_name.to_string(),
             binary_b_name: binary_b_name.to_string(),
@@ -166,5 +187,75 @@ impl BinaryDiffEngine {
 
         info!("Results saved to {}", output_path);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn function(name: &str, address: u64, operand: &str) -> FunctionInfo {
+        let instructions = vec![
+            InstructionInfo {
+                address,
+                mnemonic: "mov".into(),
+                operands: vec!["eax".into(), operand.into()],
+                length: 5,
+                ..Default::default()
+            },
+            InstructionInfo {
+                address: address + 5,
+                mnemonic: "ret".into(),
+                length: 1,
+                ..Default::default()
+            },
+        ];
+        FunctionInfo {
+            name: name.into(),
+            address,
+            size: 6,
+            basic_blocks: vec![BasicBlockInfo {
+                address,
+                size: 6,
+                instructions: instructions.clone(),
+                ..Default::default()
+            }],
+            instructions,
+            cyclomatic_complexity: 1,
+            ..Default::default()
+        }
+    }
+
+    fn diff(a: Vec<FunctionInfo>, b: Vec<FunctionInfo>) -> DiffResult {
+        BinaryDiffEngine::new()
+            .perform_diff_json(
+                &serde_json::to_string(&a).unwrap(),
+                &serde_json::to_string(&b).unwrap(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn changed_operand_is_not_exact() {
+        let result = diff(
+            vec![function("sub_1000", 0x1000, "1")],
+            vec![function("sub_2000", 0x2000, "2")],
+        );
+        assert!(result.matched_functions.is_empty());
+    }
+
+    #[test]
+    fn aggregate_similarity_penalizes_unmatched_functions() {
+        let result = diff(
+            vec![
+                function("sub_1000", 0x1000, "1"),
+                function("only_a", 0x1100, "2"),
+            ],
+            vec![function("sub_2000", 0x2000, "1")],
+        );
+        assert_eq!(result.matched_functions.len(), 1);
+        assert!((result.matched_similarity_score - 1.0).abs() < 1e-9);
+        assert!((result.match_coverage - 0.5).abs() < 1e-9);
+        assert!((result.similarity_score - 0.5).abs() < 1e-9);
     }
 }

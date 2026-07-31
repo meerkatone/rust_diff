@@ -211,7 +211,7 @@ fn generate_report_with_colors(diff_result: &DiffResult, c: &ReportColors) -> St
                     func.basic_blocks.len()
                 ));
             }
-            report.push_str("\n");
+            report.push('\n');
         }
     }
 
@@ -266,7 +266,7 @@ impl DiffUI {
             match_result.function_a.name, match_result.function_b.name
         ));
         viz.push_str("=".repeat(50).as_str());
-        viz.push_str("\n");
+        viz.push('\n');
 
         viz.push_str("Basic Block Comparison:\n");
         viz.push_str(&format!(

@@ -38,19 +38,10 @@ def _engine():
     return None
 
 try:
-    from PySide6.QtCore import (
-        QAbstractTableModel,
-        QModelIndex,
-        QSortFilterProxyModel,
-        Qt,
-        QThread,
-        Signal,
-    )
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import (
         QColor,
         QFont,
-        QStandardItem,
-        QStandardItemModel,
         QSyntaxHighlighter,
         QTextCharFormat,
     )
@@ -67,9 +58,7 @@ try:
         QLineEdit,
         QMainWindow,
         QMessageBox,
-        QProgressBar,
         QPushButton,
-        QScrollBar,
         QSplitter,
         QTableWidget,
         QTableWidgetItem,
@@ -81,19 +70,10 @@ try:
     PYSIDE_VERSION = 6
 except ImportError:
     try:
-        from PySide2.QtCore import (
-            QAbstractTableModel,
-            QModelIndex,
-            QSortFilterProxyModel,
-            Qt,
-            QThread,
-        )
-        from PySide2.QtCore import pyqtSignal as Signal
+        from PySide2.QtCore import Qt
         from PySide2.QtGui import (
             QColor,
             QFont,
-            QStandardItem,
-            QStandardItemModel,
             QSyntaxHighlighter,
             QTextCharFormat,
         )
@@ -110,9 +90,7 @@ except ImportError:
             QLineEdit,
             QMainWindow,
             QMessageBox,
-            QProgressBar,
             QPushButton,
-            QScrollBar,
             QSplitter,
             QTableWidget,
             QTableWidgetItem,
@@ -770,119 +748,6 @@ class SideBySideDiffWidget(QWidget):
         return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace(' ', '&nbsp;').replace('\t', '&nbsp;&nbsp;&nbsp;&nbsp;')
 
 
-class DiffResultsTableModel(QAbstractTableModel):
-    """Custom table model for diff results with sorting support"""
-
-    def __init__(self, results=None):
-        super().__init__()
-        self.results = results or []
-        self.headers = [
-            "Function A", "Address A", "Function B", "Address B",
-            "Similarity", "Confidence", "Match Type", "Size A", "Size B",
-            "BB Count A", "BB Count B", "Instr Count A", "Instr Count B"
-        ]
-
-    def rowCount(self, parent=QModelIndex()):
-        return len(self.results)
-
-    def columnCount(self, parent=QModelIndex()):
-        return len(self.headers)
-
-    def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
-            return self.headers[section]
-        return None
-
-    def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid() or index.row() >= len(self.results):
-            return None
-
-        result = self.results[index.row()]
-        column = index.column()
-
-        if role == Qt.DisplayRole:
-            if column == 0:  # Function A
-                return result.get('function_a', {}).get('name', '')
-            elif column == 1:  # Address A
-                return f"0x{result.get('function_a', {}).get('address', 0):x}"
-            elif column == 2:  # Function B
-                return result.get('function_b', {}).get('name', '')
-            elif column == 3:  # Address B
-                return f"0x{result.get('function_b', {}).get('address', 0):x}"
-            elif column == 4:  # Similarity
-                return f"{result.get('similarity', 0):.4f}"
-            elif column == 5:  # Confidence
-                return f"{result.get('confidence', 0):.4f}"
-            elif column == 6:  # Match Type
-                return result.get('match_type', '')
-            elif column == 7:  # Size A
-                return str(result.get('function_a', {}).get('size', 0))
-            elif column == 8:  # Size B
-                return str(result.get('function_b', {}).get('size', 0))
-            elif column == 9:  # BB Count A
-                return str(len(result.get('function_a', {}).get('basic_blocks', [])))
-            elif column == 10:  # BB Count B
-                return str(len(result.get('function_b', {}).get('basic_blocks', [])))
-            elif column == 11:  # Instr Count A
-                return str(_instr_count(result.get('function_a', {})))
-            elif column == 12:  # Instr Count B
-                return str(_instr_count(result.get('function_b', {})))
-
-        elif role == Qt.BackgroundRole:
-            # Use default dark background for all columns
-            return QColor(43, 43, 43)  # Dark gray background
-
-        elif role == Qt.TextColorRole:
-            # Set text color - white for all columns except address links
-            if column in [1, 3]:  # Address columns (clickable links)
-                return QColor(100, 149, 237)  # Light blue for clickable links
-            else:
-                return QColor(255, 255, 255)  # White text for all columns
-
-        return None
-
-    def sort(self, column, order):
-        """Sort the data by the given column"""
-        if column == 0:  # Function A
-            key = lambda x: x.get('function_a', {}).get('name', '')
-        elif column == 1:  # Address A
-            key = lambda x: x.get('function_a', {}).get('address', 0)
-        elif column == 2:  # Function B
-            key = lambda x: x.get('function_b', {}).get('name', '')
-        elif column == 3:  # Address B
-            key = lambda x: x.get('function_b', {}).get('address', 0)
-        elif column == 4:  # Similarity
-            key = lambda x: x.get('similarity', 0)
-        elif column == 5:  # Confidence
-            key = lambda x: x.get('confidence', 0)
-        elif column == 6:  # Match Type
-            key = lambda x: x.get('match_type', '')
-        elif column == 7:  # Size A
-            key = lambda x: x.get('function_a', {}).get('size', 0)
-        elif column == 8:  # Size B
-            key = lambda x: x.get('function_b', {}).get('size', 0)
-        elif column == 9:  # BB Count A
-            key = lambda x: len(x.get('function_a', {}).get('basic_blocks', []))
-        elif column == 10:  # BB Count B
-            key = lambda x: len(x.get('function_b', {}).get('basic_blocks', []))
-        elif column == 11:  # Instr Count A
-            key = lambda x: _instr_count(x.get('function_a', {}))
-        elif column == 12:  # Instr Count B
-            key = lambda x: _instr_count(x.get('function_b', {}))
-        else:
-            key = lambda x: 0
-
-        self.layoutAboutToBeChanged.emit()
-        self.results.sort(key=key, reverse=(order == Qt.DescendingOrder))
-        self.layoutChanged.emit()
-
-    def update_data(self, results):
-        """Update the model with new data"""
-        self.beginResetModel()
-        self.results = results
-        self.endResetModel()
-
-
 class DiffResultsWindow(QMainWindow):
     """Main window for displaying diff results"""
 
@@ -990,7 +855,6 @@ class DiffResultsWindow(QMainWindow):
         layout.addWidget(filters_group)
 
         # Results table
-        self.table_model = DiffResultsTableModel()
         self.table_view = QTableWidget()
         self.table_view.setSortingEnabled(False)  # Disable built-in sorting to use custom sorting
         self.table_view.setAlternatingRowColors(False)  # Disable to allow custom background colors
@@ -1065,6 +929,8 @@ class DiffResultsWindow(QMainWindow):
         self.heuristic_matches_label = QLabel("0")
         self.avg_similarity_label = QLabel("0.0000")
         self.avg_confidence_label = QLabel("0.0000")
+        self.overall_similarity_label = QLabel("0.0000")
+        self.match_coverage_label = QLabel("0.00%")
         self.unmatched_a_label = QLabel("0")
         self.unmatched_b_label = QLabel("0")
 
@@ -1084,6 +950,10 @@ class DiffResultsWindow(QMainWindow):
         stats_layout.addWidget(self.unmatched_a_label, 2, 3)
         stats_layout.addWidget(QLabel("Unmatched B:"), 3, 2)
         stats_layout.addWidget(self.unmatched_b_label, 3, 3)
+        stats_layout.addWidget(QLabel("Coverage-adjusted similarity:"), 4, 0)
+        stats_layout.addWidget(self.overall_similarity_label, 4, 1)
+        stats_layout.addWidget(QLabel("Match coverage:"), 4, 2)
+        stats_layout.addWidget(self.match_coverage_label, 4, 3)
 
         layout.addWidget(stats_group)
 
@@ -1182,18 +1052,42 @@ class DiffResultsWindow(QMainWindow):
         self.include_unmatched_checkbox.setChecked(True)
         options_layout.addWidget(self.include_unmatched_checkbox, 0, 0)
 
-        self.include_details_checkbox = QCheckBox("Include detailed match information")
+        self.include_details_checkbox = QCheckBox("Include detailed match information in JSON")
         self.include_details_checkbox.setChecked(False)
         options_layout.addWidget(self.include_details_checkbox, 0, 1)
 
         layout.addWidget(options_group)
 
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-
         layout.addStretch()
+
+    def _results_for_export(self):
+        """Return filtered matches plus optional unmatched rows."""
+        rows = list(self.filtered_results)
+        if self.include_unmatched_checkbox.isChecked():
+            rows.extend({
+                'function_a': func,
+                'function_b': {},
+                'similarity': 0.0,
+                'confidence': 0.0,
+                'match_type': 'Unmatched A',
+                'details': {},
+            } for func in self.results_data.get('unmatched_functions_a', []))
+            rows.extend({
+                'function_a': {},
+                'function_b': func,
+                'similarity': 0.0,
+                'confidence': 0.0,
+                'match_type': 'Unmatched B',
+                'details': {},
+            } for func in self.results_data.get('unmatched_functions_b', []))
+        return rows
+
+    def _json_export_rows(self):
+        rows = self._results_for_export()
+        if self.include_details_checkbox.isChecked():
+            return rows
+        return [{key: value for key, value in row.items()
+                 if key not in ('details', 'il_similarity')} for row in rows]
 
     def load_results(self):
         """Load results into the table"""
@@ -1397,6 +1291,10 @@ class DiffResultsWindow(QMainWindow):
         self.heuristic_matches_label.setText(str(heuristic_count))
         self.avg_similarity_label.setText(f"{avg_similarity:.4f}")
         self.avg_confidence_label.setText(f"{avg_confidence:.4f}")
+        self.overall_similarity_label.setText(
+            f"{self.results_data.get('similarity_score', 0):.4f}")
+        self.match_coverage_label.setText(
+            f"{self.results_data.get('match_coverage', 0):.2%}")
         self.unmatched_a_label.setText(str(len(unmatched_a)))
         self.unmatched_b_label.setText(str(len(unmatched_b)))
 
@@ -1740,6 +1638,8 @@ class DiffResultsWindow(QMainWindow):
             return s
 
         def _fmt_addr(v):
+            if v is None:
+                return ''
             try:
                 return f"0x{int(v):016x}"
             except (TypeError, ValueError):
@@ -1757,15 +1657,15 @@ class DiffResultsWindow(QMainWindow):
                 ])
 
                 # Write data
-                for result in self.filtered_results:
+                for result in self._results_for_export():
                     func_a = result.get('function_a', {})
                     func_b = result.get('function_b', {})
 
                     writer.writerow([
                         _csv_safe(func_a.get('name', '')),
-                        _fmt_addr(func_a.get('address', 0)),
+                        _fmt_addr(func_a.get('address')),
                         _csv_safe(func_b.get('name', '')),
-                        _fmt_addr(func_b.get('address', 0)),
+                        _fmt_addr(func_b.get('address')),
                         f"{result.get('similarity', 0):.4f}",
                         f"{result.get('confidence', 0):.4f}",
                         _csv_safe(result.get('match_type', '')),
@@ -1814,13 +1714,15 @@ class DiffResultsWindow(QMainWindow):
             ''')
 
             def _fmt_addr(v):
+                if v is None:
+                    return ''
                 try:
                     return f"0x{int(v):016x}"
                 except (TypeError, ValueError):
                     return str(v)
 
             # Insert data
-            for result in self.filtered_results:
+            for result in self._results_for_export():
                 func_a = result.get('function_a', {})
                 func_b = result.get('function_b', {})
 
@@ -1832,9 +1734,9 @@ class DiffResultsWindow(QMainWindow):
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     func_a.get('name', ''),
-                    _fmt_addr(func_a.get('address', 0)),
+                    _fmt_addr(func_a.get('address')),
                     func_b.get('name', ''),
-                    _fmt_addr(func_b.get('address', 0)),
+                    _fmt_addr(func_b.get('address')),
                     result.get('similarity', 0),
                     result.get('confidence', 0),
                     result.get('match_type', ''),
@@ -1864,11 +1766,11 @@ class DiffResultsWindow(QMainWindow):
             export_data = {
                 'metadata': {
                     'export_time': datetime.now().isoformat(),
-                    'total_results': len(self.filtered_results),
+                    'total_results': len(self._results_for_export()),
                     'binary_a': self.results_data.get('binary_a_name', ''),
                     'binary_b': self.results_data.get('binary_b_name', ''),
                 },
-                'results': self.filtered_results
+                'results': self._json_export_rows()
             }
 
             with open(filename, 'w', encoding='utf-8') as f:
@@ -2036,13 +1938,15 @@ class DiffResultsWindow(QMainWindow):
     def generate_html_table_rows(self):
         """Generate HTML table rows for results"""
         def _fmt_addr(v):
+            if v is None:
+                return ''
             try:
                 return f"0x{int(v):016x}"
             except (TypeError, ValueError):
                 return html.escape(str(v))
 
         parts = []
-        for result in self.filtered_results:
+        for result in self._results_for_export():
             func_a = result.get('function_a', {})
             func_b = result.get('function_b', {})
             confidence = result.get('confidence', 0)
@@ -2057,9 +1961,9 @@ class DiffResultsWindow(QMainWindow):
             parts.append(
                 f'<tr class="{css_class}">'
                 f'<td>{html.escape(str(func_a.get("name", "")))}</td>'
-                f'<td>{_fmt_addr(func_a.get("address", 0))}</td>'
+                f'<td>{_fmt_addr(func_a.get("address"))}</td>'
                 f'<td>{html.escape(str(func_b.get("name", "")))}</td>'
-                f'<td>{_fmt_addr(func_b.get("address", 0))}</td>'
+                f'<td>{_fmt_addr(func_b.get("address"))}</td>'
                 f'<td>{result.get("similarity", 0):.4f}</td>'
                 f'<td>{result.get("confidence", 0):.4f}</td>'
                 f'<td>{html.escape(str(result.get("match_type", "")))}</td>'
@@ -2077,12 +1981,22 @@ def show_diff_results(results_data, binary_view_a=None, binary_view_b=None):
             app = QApplication([])
 
         window = DiffResultsWindow(results_data, binary_view_a, binary_view_b)
+        window.setAttribute(Qt.WA_DeleteOnClose, True)
         window.show()
 
         # Make sure the window stays alive
         if not hasattr(show_diff_results, '_windows'):
             show_diff_results._windows = []
         show_diff_results._windows.append(window)
+        window_id = id(window)
+
+        def _forget_window(_=None):
+            show_diff_results._windows[:] = [
+                candidate for candidate in show_diff_results._windows
+                if id(candidate) != window_id
+            ]
+
+        window.destroyed.connect(_forget_window)
 
         return window
     except Exception as e:

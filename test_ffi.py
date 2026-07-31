@@ -119,6 +119,21 @@ assert ("only_in_a", "only_in_b") not in names, "unrelated leaf functions wrongl
 # slimmed payload still carries counts for the UI
 fa = r1["matched_functions"][0]["function_a"]
 assert fa["instructions"] == [] and fa["instruction_count"] > 0
+assert 0 < r1["match_coverage"] < 1
+assert r1["similarity_score"] < r1["matched_similarity_score"]
+
+
+# Same mnemonic sequence with a changed operand is not exact.
+operand_a = func("sub_9000", 0x9000, [bb(0x9000, ["mov", "ret"], [])])
+operand_b = func("sub_a000", 0xA000, [bb(0xA000, ["mov", "ret"], [])])
+operand_a["instructions"][0]["operands"] = ["eax", "1"]
+operand_a["basic_blocks"][0]["instructions"][0]["operands"] = ["eax", "1"]
+operand_b["instructions"][0]["operands"] = ["eax", "2"]
+operand_b["basic_blocks"][0]["instructions"][0]["operands"] = ["eax", "2"]
+ptr = lib.rust_diff_diff_json(json.dumps([operand_a]).encode(), json.dumps([operand_b]).encode())
+operand_result = json.loads(ctypes.cast(ptr, ctypes.c_char_p).value.decode())
+lib.rust_diff_free_string(ptr)
+assert not operand_result["matched_functions"], operand_result
 
 
 # ---------------------------------------------------------------------------
@@ -160,5 +175,15 @@ d_rename = il_diff({"a": _OLD, "b": _NEW, "rename_map": {"testa": "testb"}})
 assert op_for(d_rename, "testa(arg1)") == "rename", d_rename
 assert sum(1 for l in d_rename["lines"] if l["op"] == "replace") == 1, d_rename
 print("IL diff: rename-vs-replace distinction OK")
+
+# Bounds are semantic, not cosmetic immediates.
+d_bound = il_diff({
+    "a": {"level": "MLIL", "lines": [il_line([
+        ("localVariable", "len"), ("text", " > "), ("integer", "64")], "len > 64")]},
+    "b": {"level": "MLIL", "lines": [il_line([
+        ("localVariable", "len"), ("text", " > "), ("integer", "128")], "len > 128")]},
+})
+assert d_bound["lines"][0]["op"] == "replace", d_bound
+assert d_bound["similarity"] == 0.0, d_bound
 
 print("\nAll assertions passed. Deterministic across runs: yes")

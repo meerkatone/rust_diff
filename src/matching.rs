@@ -39,6 +39,12 @@ pub struct MatchingEngine {
     similarity_threshold: f64,
 }
 
+impl Default for MatchingEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MatchingEngine {
     pub fn new() -> Self {
         Self {
@@ -54,6 +60,7 @@ impl MatchingEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_match(
         matches: &mut Vec<FunctionMatch>,
         used_a: &mut FxHashSet<usize>,
@@ -114,11 +121,13 @@ impl MatchingEngine {
         //    content hash. Structure alone is not enough for "exact" — small
         //    leaf functions with different instructions share WL hashes.
         let exact_key = |f: &FunctionInfo| {
-            Some((
-                DiffAlgorithms::calculate_fuzzy_hash(f),
-                f.cfg_hash.clone(),
-                f.call_graph_hash.clone(),
-            ))
+            (!f.instructions.is_empty()).then(|| {
+                (
+                    DiffAlgorithms::calculate_instruction_content_hash(f),
+                    f.cfg_hash.clone(),
+                    f.call_graph_hash.clone(),
+                )
+            })
         };
         let exact_a: Vec<Option<(String, String, String)>> =
             functions_a.iter().map(exact_key).collect();
@@ -176,7 +185,7 @@ impl MatchingEngine {
         //    minimum number of blocks for the hash to mean anything.
         fn wl_key(f: &FunctionInfo) -> Option<&str> {
             const MIN_STRUCTURAL_BLOCKS: usize = 3;
-            (f.basic_blocks.len() >= MIN_STRUCTURAL_BLOCKS).then(|| f.cfg_hash.as_str())
+            (f.basic_blocks.len() >= MIN_STRUCTURAL_BLOCKS).then_some(f.cfg_hash.as_str())
         }
         let wl_a: Vec<Option<&str>> = functions_a.iter().map(wl_key).collect();
         let wl_b: Vec<Option<&str>> = functions_b.iter().map(wl_key).collect();
@@ -226,7 +235,6 @@ impl MatchingEngine {
         used_a: &mut FxHashSet<usize>,
         used_b: &mut FxHashSet<usize>,
     ) -> Result<()> {
-        const NAME_SIMILARITY_FLOOR: f64 = 0.1;
         let mut name_map_b: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
 
         for (i, func_b) in functions_b.iter().enumerate() {
@@ -245,10 +253,9 @@ impl MatchingEngine {
                     if !used_b.contains(&idx) {
                         let (similarity, details) =
                             DiffAlgorithms::compute_match_details(func_a, &functions_b[idx]);
-                        if similarity >= NAME_SIMILARITY_FLOOR
-                            && best.as_ref().map_or(true, |(bi, bs, _)| {
-                                better_candidate(similarity, idx, *bs, *bi)
-                            })
+                        if best
+                            .as_ref()
+                            .is_none_or(|(bi, bs, _)| better_candidate(similarity, idx, *bs, *bi))
                         {
                             best = Some((idx, similarity, details));
                         }
@@ -314,7 +321,7 @@ impl MatchingEngine {
                         let (similarity, details) =
                             DiffAlgorithms::compute_match_details(func_a, &functions_b[idx]);
                         if similarity >= min_similarity
-                            && best.as_ref().map_or(true, |(bi, bs, _)| {
+                            && best.as_ref().is_none_or(|(bi, bs, _)| {
                                 better_candidate(similarity, idx, *bs, *bi)
                             })
                         {
@@ -456,52 +463,72 @@ impl MatchingEngine {
         used_a: &mut FxHashSet<usize>,
         used_b: &mut FxHashSet<usize>,
     ) -> Result<()> {
-        let mut candidates: Vec<_> = functions_a
+        // Tiny functions carry too little signal for fuzzy matching; they are
+        // only matched by exact/name/call-graph evidence. For larger functions,
+        // run expensive metrics only against the closest size/shape candidates.
+        const MIN_FUZZY_INSTRUCTIONS: usize = 5;
+        const MAX_CANDIDATES_PER_FUNCTION: usize = 48;
+        const CANDIDATE_WINDOW: usize = 256;
+        let mut b_by_size: Vec<(usize, usize)> = functions_b
             .iter()
             .enumerate()
-            .filter(|(idx_a, _)| !used_a.contains(idx_a))
-            .par_bridge()
-            .filter_map(|(idx_a, func_a)| {
-                let mut best_match: Option<(usize, f64, MatchDetails)> = None;
+            .filter(|(i, f)| !used_b.contains(i) && f.instructions.len() >= MIN_FUZZY_INSTRUCTIONS)
+            .map(|(i, f)| (i, f.instructions.len()))
+            .collect();
+        b_by_size.sort_by_key(|&(i, count)| (count, i));
 
-                // Tiny functions carry too little signal for fuzzy matching;
-                // they are only matched by exact/name/call-graph evidence
-                // (same guard Diaphora applies to its fuzzy heuristics).
-                const MIN_FUZZY_INSTRUCTIONS: usize = 5;
-                if func_a.instructions.len() < MIN_FUZZY_INSTRUCTIONS {
-                    return None;
-                }
+        let nested: Vec<Vec<(usize, usize, f64, MatchDetails)>> = functions_a
+            .par_iter()
+            .enumerate()
+            .filter(|(idx_a, f)| {
+                !used_a.contains(idx_a) && f.instructions.len() >= MIN_FUZZY_INSTRUCTIONS
+            })
+            .map(|(idx_a, func_a)| {
+                let count_a = func_a.instructions.len();
+                let pivot = b_by_size.partition_point(|&(_, count)| count < count_a);
+                let start = pivot.saturating_sub(CANDIDATE_WINDOW);
+                let end = pivot.saturating_add(CANDIDATE_WINDOW).min(b_by_size.len());
+                let mut nearby = b_by_size[start..end].to_vec();
+                nearby.sort_by_key(|&(idx_b, count_b)| {
+                    (
+                        count_a.abs_diff(count_b),
+                        func_a
+                            .basic_blocks
+                            .len()
+                            .abs_diff(functions_b[idx_b].basic_blocks.len()),
+                        idx_b,
+                    )
+                });
+                nearby.truncate(MAX_CANDIDATES_PER_FUNCTION);
 
-                for (i, func_b) in functions_b.iter().enumerate() {
-                    if used_b.contains(&i) || func_b.instructions.len() < MIN_FUZZY_INSTRUCTIONS {
-                        continue;
-                    }
-
-                    let (primary, details) = DiffAlgorithms::compute_match_details(func_a, func_b);
-                    let comprehensive =
-                        SimilarityAnalyzer::comprehensive_similarity(func_a, func_b);
-                    let similarity = (primary * 0.6 + comprehensive * 0.4).clamp(0.0, 1.0);
-                    let confidence =
-                        DiffAlgorithms::confidence_for_match(&MatchType::Heuristic, similarity);
-
-                    if confidence >= self.confidence_threshold
-                        && similarity >= self.similarity_threshold
-                    {
-                        if best_match.as_ref().map_or(true, |(bi, bs, _)| {
-                            better_candidate(similarity, i, *bs, *bi)
-                        }) {
-                            best_match = Some((i, similarity, details));
-                        }
-                    }
-                }
-
-                best_match.map(|(idx, similarity, details)| (idx_a, idx, similarity, details))
+                nearby
+                    .into_iter()
+                    .filter_map(|(idx_b, _)| {
+                        let func_b = &functions_b[idx_b];
+                        let (primary, details) =
+                            DiffAlgorithms::compute_match_details(func_a, func_b);
+                        let comprehensive =
+                            SimilarityAnalyzer::comprehensive_similarity(func_a, func_b);
+                        let similarity = (primary * 0.6 + comprehensive * 0.4).clamp(0.0, 1.0);
+                        let confidence =
+                            DiffAlgorithms::confidence_for_match(&MatchType::Heuristic, similarity);
+                        (confidence >= self.confidence_threshold
+                            && similarity >= self.similarity_threshold)
+                            .then_some((idx_a, idx_b, similarity, details))
+                    })
+                    .collect()
             })
             .collect();
+        let mut candidates: Vec<_> = nested.into_iter().flatten().collect();
 
-        // Deterministic conflict resolution: prefer higher similarity, then
-        // lowest idx_a for stable tie-breaking.
-        candidates.sort_by(|a, b| b.2.total_cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        // Deterministic global conflict resolution. Keeping every qualifying
+        // alternative prevents a function whose first choice was consumed from
+        // being stranded even though its second choice is valid.
+        candidates.sort_by(|a, b| {
+            b.2.total_cmp(&a.2)
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.1.cmp(&b.1))
+        });
         for (idx_a, idx_b, similarity, details) in candidates {
             if !used_a.contains(&idx_a) && !used_b.contains(&idx_b) {
                 Self::push_match(

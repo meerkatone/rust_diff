@@ -40,7 +40,6 @@ panel.
 
 - [Binary Ninja](https://binary.ninja/) (Commercial or Personal license latest dev build)
 - [Rust toolchain](https://rustup.rs/) (latest stable)
-- Binary Ninja API development headers
 - Python 3.x
 - Optional: PySide6 or PySide2 (for GUI features)
 
@@ -62,23 +61,10 @@ panel.
    python install_pyside.py
    ```
 
-   The build script links against `libbinaryninjacore` from your Binary Ninja
-   install. By default it searches these locations:
-   - macOS: `/Applications/Binary Ninja.app/Contents/MacOS/`, then
-     `/Applications/Binary Ninja Personal Dev/Binary Ninja.app/Contents/MacOS/`
-   - Linux: `/opt/binaryninja/`
-   - Windows: `C:\Program Files\Vector35\BinaryNinja\`
-
-   If your install is elsewhere, or if you intentionally want to build against
-   a dev app bundle, set `BINJA_DIR` to the directory that contains
-   `libbinaryninjacore` before building:
-   ```bash
-   BINJA_DIR="/Applications/Binary Ninja Personal Dev/Binary Ninja.app/Contents/MacOS" cargo build --release
-   ```
-
-   On macOS and Linux, the selected directory is embedded as an rpath in the
-   Rust dylib. Build against the same Binary Ninja install that will load the
-   plugin to avoid core-library version mismatches.
+   The Rust engine communicates with the Python frontend exclusively through
+   JSON FFI and does not link against `libbinaryninjacore`. It can therefore be
+   built on a machine without Binary Ninja installed and does not need to be
+   rebuilt when switching between stable and development Binary Ninja builds.
 
 3. Place the whole plugin directory (this repository) in Binary Ninja's
    plugin directory. The Python frontend loads the Rust engine directly from
@@ -92,17 +78,8 @@ panel.
 
 4. Restart Binary Ninja to load the plugin.
 
-### Updating or switching Binary Ninja builds
-
-Rebuild the Rust engine after updating Binary Ninja, switching between stable
-and dev builds, or changing `BINJA_DIR`:
-
-```bash
-cargo build --release
-```
-
-If Binary Ninja logs `Failed to load Rust diff engine`, rebuild with the
-correct `BINJA_DIR` and restart Binary Ninja.
+If Binary Ninja logs `Failed to load Rust diff engine`, run
+`cargo build --release` in the plugin directory and restart Binary Ninja.
 
 ### Verifying the engine
 
@@ -183,6 +160,11 @@ similarity to re-rank those weak matches and to *rescue* matches the
 disassembly heuristics missed (reported with match type `IL`). It is capped so
 large binaries stay responsive and is skipped entirely when nothing is weak or
 unmatched.
+
+The reported overall similarity is coverage-adjusted: unmatched functions
+contribute zero. Results also expose `matched_similarity_score` (the mean over
+matched pairs) and `match_coverage` so a small shared subset cannot make two
+otherwise unrelated binaries appear identical.
 
 ## Usage
 

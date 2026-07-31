@@ -14,9 +14,9 @@
   "minimumBinaryNinjaVersion": "3.0.0",
   "platforms": ["Darwin", "Linux", "Windows"],
   "installinstructions": {
-    "Darwin": "Install via plugin manager or manually copy to plugins directory",
-    "Linux": "Install via plugin manager or manually copy to plugins directory", 
-    "Windows": "Install via plugin manager or manually copy to plugins directory"
+    "Darwin": "Copy the plugin directory, run cargo build --release inside it, and restart Binary Ninja",
+    "Linux": "Copy the plugin directory, run cargo build --release inside it, and restart Binary Ninja",
+    "Windows": "Copy the plugin directory, run cargo build --release inside it, and restart Binary Ninja"
   },
   "dependencies": {},
   "path": "__init__.py"
