@@ -1,5 +1,9 @@
 # Binary Diffing Plugin for Binary Ninja
 
+> Status: superseded by Binja Diff View, which bundles this Rust engine with
+> the current native workspace. This repository remains available for the
+> standalone Python frontend and engine history.
+
 A high-performance binary diffing plugin for Binary Ninja that compares functions between two binaries using advanced structural and semantic analysis. Built with Rust for performance and Python for Binary Ninja integration.
 
 ## Binary Diffing Example
